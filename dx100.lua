@@ -716,6 +716,25 @@ function init()
   params:add_control("pan", "pan", controlspec.new(-1, 1, "lin", 0, 0))
   params:set_action("pan", function(x) engine.pan(x) end)
 
+  params:add_trigger("clear_noise", "clear noise")
+  params:set_action("clear_noise", function()
+    -- everything under "character" back to off, plus the two randomiser
+    -- settings that produce distortion or ring-mod style artifacts:
+    -- heavy feedback, and fixed-frequency operators (in fixed mode an
+    -- operator runs at the same constant hz in every voice, so voices
+    -- sum coherently and beat against each other).
+    for _, id in ipairs({ "bits", "srate", "drive", "glitch", "hiss",
+                          "rate_scale" }) do
+      params:set(id, 0)
+    end
+    params:set("feedback", 0)
+    for i = 1, OPS do
+      params:set(op_id("fixed", i), 1)  -- 1 = ratio, 2 = fixed hz
+      params:set(op_id("det", i), 0)
+    end
+    flash("CLEAR", "noise")
+  end)
+
   params:add_separator("headroom (wip)")
   -- temporary controls while we dial in polyphonic level. once a good
   -- pair is found these get hard-coded and the params removed.
