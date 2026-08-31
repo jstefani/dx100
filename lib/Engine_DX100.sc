@@ -165,12 +165,13 @@ Engine_DX100 : CroneEngine {
 			// 3 quarter-sine, 4 alt-sine, 5 alt half, 6 sine^2ish, 7 saw-ish
 			opWave = { arg ph, w, fq;
 				var s, half, absS, quart, alt, altHalf, squared, sawish;
-				// SinOsc's phase input is only well-behaved within +/-8pi;
-				// past that its lookup wraps unpredictably and the output
-				// breaks into hard discontinuities. Modulation index * a
-				// modulator stack can run well past that, so fold the phase
-				// into one cycle first -- mathematically identical for a
-				// periodic waveform, and free of the edge artifacts.
+				// SinOsc's phase input degrades past about +/-8pi (~25 rad):
+				// measured max error vs a wrapped phase is ~1e-7 below that
+				// and jumps to ~2.0 above it. This engine's worst case is
+				// m(7.0) * two modulators at full level = 14 rad, so the
+				// bound is not currently reached -- this wrap is cheap
+				// insurance if m or operator levels are ever raised, not a
+				// fix for an audible defect.
 				ph = ph.wrap(-pi, pi);
 				s = SinOsc.ar(fq, ph);
 				half = s.max(0);
