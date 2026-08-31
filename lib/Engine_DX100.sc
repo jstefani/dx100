@@ -52,7 +52,7 @@ Engine_DX100 : CroneEngine {
 			var ratios, dets, fixed, fixedHz, waves, levels;
 			var oscFreq, envs, ops, snd, fb, fbBuf;
 			var opWave, mkEnv, rateTime, out1, out2, out3, out4;
-			var m, carrierSum, nCarriers;
+			var m, carrierSum, nCarriers, algSel;
 
 			// ---- pitch ----
 			hz = Lag.kr(hz, 0.001) * (2 ** (transpose / 12));
@@ -214,42 +214,34 @@ Engine_DX100 : CroneEngine {
 			//  6: 4>1, 4>2, 4>3 (three carriers from one mod)
 			//  7: 4>3, then 3+2+1 all carriers
 			//  8: all four parallel carriers
+			//
+			// Select the *modulator input* per op, then run opWave once.
+			// Selecting 8 full opWave graphs used to compile ~1000 UGens
+			// per voice (every algorithm, every sample). A releasing tail
+			// costs the same as a held note, so any overlap doubled CPU.
+
+			algSel = algo.round.clip(0, 7);
 
 			// op3: modulated by op4 in algs 1, 4, 5, 6, 7
-			out3 = Select.ar(algo.round.clip(0, 7), [
-				opWave.(out4 * m, waves[2], oscFreq[2]),                 // 1: 4>3
-				opWave.(DC.ar(0), waves[2], oscFreq[2]),                 // 2: 3 free
-				opWave.(DC.ar(0), waves[2], oscFreq[2]),                 // 3: 3 free
-				opWave.(out4 * m, waves[2], oscFreq[2]),                 // 4: 4>3
-				opWave.(out4 * m, waves[2], oscFreq[2]),                 // 5: 4>3
-				opWave.(out4 * m, waves[2], oscFreq[2]),                 // 6: 4>3
-				opWave.(out4 * m, waves[2], oscFreq[2]),                 // 7: 4>3
-				opWave.(DC.ar(0), waves[2], oscFreq[2])                  // 8: parallel
-			]) * envs[2] * Lag.kr(levels[2], 0.03) * amod;
+			out3 = opWave.(Select.ar(algSel, [
+				out4 * m, DC.ar(0), DC.ar(0), out4 * m,
+				out4 * m, out4 * m, out4 * m, DC.ar(0)
+			]), waves[2], oscFreq[2])
+				* envs[2] * Lag.kr(levels[2], 0.03) * amod;
 
 			// op2
-			out2 = Select.ar(algo.round.clip(0, 7), [
-				opWave.(out3 * m, waves[1], oscFreq[1]),                 // 1: 3>2
-				opWave.((out3 + out4) * m, waves[1], oscFreq[1]),        // 2: 3+4>2
-				opWave.(out3 * m, waves[1], oscFreq[1]),                 // 3: 3>2
-				opWave.(DC.ar(0), waves[1], oscFreq[1]),                 // 4: 2 free
-				opWave.(out4 * m, waves[1], oscFreq[1]),                 // 5: 4>2
-				opWave.(out4 * m, waves[1], oscFreq[1]),                 // 6: 4>2
-				opWave.(DC.ar(0), waves[1], oscFreq[1]),                 // 7: carrier
-				opWave.(DC.ar(0), waves[1], oscFreq[1])                  // 8: carrier
-			]) * envs[1] * Lag.kr(levels[1], 0.03) * amod;
+			out2 = opWave.(Select.ar(algSel, [
+				out3 * m, (out3 + out4) * m, out3 * m, DC.ar(0),
+				out4 * m, out4 * m, DC.ar(0), DC.ar(0)
+			]), waves[1], oscFreq[1])
+				* envs[1] * Lag.kr(levels[1], 0.03) * amod;
 
 			// op1 (always a carrier)
-			out1 = Select.ar(algo.round.clip(0, 7), [
-				opWave.(out2 * m, waves[0], oscFreq[0]),                 // 1: 2>1
-				opWave.(out2 * m, waves[0], oscFreq[0]),                 // 2: 2>1
-				opWave.((out2 + out4) * m, waves[0], oscFreq[0]),        // 3: 2+4>1
-				opWave.((out3 + out2) * m, waves[0], oscFreq[0]),        // 4: 3+2>1
-				opWave.(out3 * m, waves[0], oscFreq[0]),                 // 5: 3>1
-				opWave.(out4 * m, waves[0], oscFreq[0]),                 // 6: 4>1
-				opWave.(DC.ar(0), waves[0], oscFreq[0]),                 // 7: carrier
-				opWave.(DC.ar(0), waves[0], oscFreq[0])                  // 8: carrier
-			]) * envs[0] * Lag.kr(levels[0], 0.03) * amod;
+			out1 = opWave.(Select.ar(algSel, [
+				out2 * m, out2 * m, (out2 + out4) * m, (out3 + out2) * m,
+				out3 * m, out4 * m, DC.ar(0), DC.ar(0)
+			]), waves[0], oscFreq[0])
+				* envs[0] * Lag.kr(levels[0], 0.03) * amod;
 
 			// which ops reach the output, per algorithm
 			carrierSum = Select.ar(algo.round.clip(0, 7), [
@@ -389,11 +381,6 @@ Engine_DX100 : CroneEngine {
 			ctlBus[k].setSynchronous([0.3, 0.5, 0.5, 0.5][i]);
 		});
 		ctlBus[\rateScale].setSynchronous(0);
-		ctlBus[\drive].setSynchronous(0);
-		ctlBus[\hiss].setSynchronous(0);
-		ctlBus[\bits].setSynchronous(0);
-		ctlBus[\srate].setSynchronous(0);
-		ctlBus[\glitch].setSynchronous(0);
 
 		// voices -> private stereo bus -> single fx synth -> norns out.
 		fxBus = Bus.audio(context.server, 2);
