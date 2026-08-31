@@ -716,6 +716,23 @@ function init()
   params:add_control("pan", "pan", controlspec.new(-1, 1, "lin", 0, 0))
   params:set_action("pan", function(x) engine.pan(x) end)
 
+  params:add_separator("headroom (wip)")
+  -- temporary controls while we dial in polyphonic level. once a good
+  -- pair is found these get hard-coded and the params removed.
+  params:add_control("headroom", "headroom",
+    controlspec.new(0, 2, "lin", 0, 1.0))
+  params:set_action("headroom", function(x)
+    engine.headroom(x)
+    flash("HEADROOM", string.format("%.2f", x))
+  end)
+  -- 0 = none, 0.5 = 1/sqrt(N), 1.0 = 1/N
+  params:add_control("scale_exp", "voice scaling",
+    controlspec.new(0, 1.5, "lin", 0, 0.5))
+  params:set_action("scale_exp", function(x)
+    engine.scale_exp(x)
+    flash("VSCALE", string.format("%.2f", x))
+  end)
+
   params:add_separator("presets")
   params:add_number("preset", "voice", 1, #presets, 1)
   params:set_action("preset", function(x)

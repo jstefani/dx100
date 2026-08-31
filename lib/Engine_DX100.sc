@@ -11,6 +11,8 @@ Engine_DX100 : CroneEngine {
 	var <voiceOrder;
 	var <ctlBus;
 	var <poly;
+	var <scaleExp;
+	var <headroom;
 
 	*new { arg context, doneCallback;
 		^super.new(context, doneCallback);
@@ -19,7 +21,7 @@ Engine_DX100 : CroneEngine {
 	alloc {
 		SynthDef(\dx100, {
 			arg out, hz = 220, gate = 0, vel = 1, legato = 0, t_trig = 0,
-			persist = 0, killGate = 1, voiceScale = 1,
+			persist = 0, killGate = 1, voiceScale = 1, headroom = 1,
 			algo = 0, feedback = 0, amp = 0.4, pan = 0, transpose = 0,
 			port = 0, portMode = 0,
 			lfoRate = 4, lfoWave = 0, lfoDelay = 0, pms = 0, ams = 0,
@@ -297,10 +299,12 @@ Engine_DX100 : CroneEngine {
 			// letting the sum clip -- clipping the mix is what turned chords
 			// into distortion and ring-mod grain.
 			snd = snd * Lag.kr(voiceScale, 0.03);
-			// soft saturation instead of a hard clip: hard-clip edges are
-			// broadband and read as digital grit, and a per-voice hard clip
-			// cannot protect the sum anyway.
-			snd = snd.tanh;
+			// headroom trim, exposed as a param while we dial this in.
+			snd = snd * Lag.kr(headroom, 0.05);
+			// NOTE: no per-voice saturation here. tanh/clip2 applied to a
+			// single voice cannot protect the summed bus, and tanh bends
+			// well below 1.0, so it added harmonic distortion to every
+			// voice whether or not anything was near clipping.
 			Out.ar(out, Pan2.ar(snd, Lag.kr(pan, 0.08)));
 		}).add;
 
@@ -379,6 +383,22 @@ Engine_DX100 : CroneEngine {
 		voices = Dictionary.new;
 		voiceOrder = List.new;
 		poly = 1;
+		scaleExp = 0.5;
+		headroom = 1.0;
+
+		this.addCommand("scale_exp", "f", { arg msg;
+			scaleExp = msg[1].clip(0, 1.5);
+			this.rebalance;
+		});
+
+		this.addCommand("headroom", "f", { arg msg;
+			headroom = msg[1].clip(0, 2);
+			voices.do({ arg syn;
+				if(syn.notNil and: { syn.isPlaying }, {
+					syn.set(\headroom, headroom);
+				});
+			});
+		});
 
 		this.addCommand("voice_mode", "f", { arg msg;
 			poly = (msg[1] > 0.5).if({ 1 }, { 0 });
@@ -410,7 +430,8 @@ Engine_DX100 : CroneEngine {
 	rebalance {
 		var n, scale;
 		n = voices.size.max(1);
-		scale = n.sqrt.reciprocal;
+		// scaleExp 0 = no scaling, 0.5 = 1/sqrt(N), 1.0 = 1/N
+		scale = n.pow(scaleExp.neg);
 		voices.do({ arg syn;
 			if(syn.notNil and: { syn.isPlaying }, {
 				syn.set(\voiceScale, scale);
@@ -442,7 +463,8 @@ Engine_DX100 : CroneEngine {
 				args = args.add(name).add(bus.getSynchronous);
 			});
 			args = args.add(\voiceScale).add(
-				(voices.size + 1).max(1).sqrt.reciprocal);
+				(voices.size + 1).max(1).pow(scaleExp.neg));
+			args = args.add(\headroom).add(headroom);
 			syn = Synth(\dx100, args, gr);
 			ctlBus.keys.do({ arg name;
 				syn.map(name, ctlBus[name]);
