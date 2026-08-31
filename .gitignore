@@ -1,4 +1,5 @@
-# norns compiles every .sc under dust/, so a copy of the engine class
-# anywhere but lib/ is a duplicate class definition and breaks the
-# class library build -- the device then will not start.
-test/sc/Engine_DX100.sc
+# norns compiles EVERY .sc file under ~/dust into its class library.
+# A second definition of any class breaks the build and the device will
+# not start -- and a stubbed CroneEngine breaks every engine, not just
+# this one. Nothing under test/ may ever be a .sc file.
+test/**/*.sc

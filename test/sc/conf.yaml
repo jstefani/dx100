@@ -1,4 +1,6 @@
-includePaths:
-  - ./test/sc
+# No includePaths: the test scripts here are standalone UGen tests and
+# need no project classes. Deliberately does NOT add any directory that
+# could shadow norns classes.
+includePaths: []
 excludeDefaultPaths: false
 postInlineWarnings: false

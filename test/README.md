@@ -4,23 +4,26 @@ SuperCollider lives at
 `/Applications/SuperCollider.app/Contents/MacOS/sclang` (3.14.1); there is
 no `sclang` on PATH.
 
-`CroneStub.sc` stubs `CroneEngine` so `lib/Engine_DX100.sc` compiles off
-the norns.
+**No `.sc` files may live in this directory.** norns compiles every
+`.sc` file under `~/dust` into its class library. A duplicate class
+definition breaks the build and *the device will not start*:
 
-**Never deploy `test/` to the norns, and never leave a copy of
-`Engine_DX100.sc` in here.** norns compiles every `.sc` file under
-`dust/`, so a second copy of the class is a duplicate definition: the
-class library fails to build and *the device will not start*. The copy
-is gitignored for that reason.
+    ERROR: duplicate Class found: 'CroneEngine'
+    ERROR: duplicate Class found: 'Engine_DX100'
 
-To compile-check the engine, copy it in, run, then delete it:
+A stubbed `CroneEngine` is the worse of the two — it redefines the base
+class every norns engine inherits from, breaking all of them. `test/**/*.sc`
+is gitignored to prevent this.
 
-    cp lib/Engine_DX100.sc test/sc/
+The scripts here are standalone UGen tests that need no project classes,
+so `conf.yaml` deliberately sets `includePaths: []`. Run from the repo
+root:
+
     /Applications/SuperCollider.app/Contents/MacOS/sclang \
       -l test/sc/conf.yaml test/sc/<script>.scd
-    rm test/sc/Engine_DX100.sc
 
-Note `conf.yaml` uses a relative includePath, so run from the repo root.
+To compile-check `Engine_DX100.sc` itself you need the real norns class
+library — do it on the device, not here.
 
 Deploy with `test/` excluded:
 
@@ -33,6 +36,9 @@ Deploy with `test/` excluded:
   down (~8pi). Establishes that the engine never reaches it.
 - `localin_isolation.scd` — proves LocalIn/LocalOut feedback loops are
   private per synth inside a ParGroup.
+- `quantize_poly.scd` — shows per-voice quantization produces 2.8x the
+  error of quantizing the mix at 8 voices, and identical error at 1.
+  This is why the character fx moved to a single post-mix synth.
 
 Both write results to stdout and call `0.exit`.
 

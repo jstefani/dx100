@@ -119,17 +119,20 @@ to confirm.
 SuperCollider is at `/Applications/SuperCollider.app/Contents/MacOS/sclang`
 (3.14.1). There is no `sclang` on PATH; use the full path.
 
-`Engine_DX100` subclasses `CroneEngine`, which only exists on norns. A
-working stub, sclang config and two passing test scripts are committed
-in `test/sc/` — see `test/README.md`. Run from the repo root:
+**No `.sc` file may exist under `test/`.** norns compiles every `.sc`
+under `~/dust`, so a duplicate class definition breaks the class library
+build and the device will not start. A stubbed `CroneEngine` is worse
+still — it breaks every engine on the device, not just this one. This
+happened once; `test/**/*.sc` is now gitignored.
+
+The scripts in `test/sc/` are standalone UGen tests needing no project
+classes. Run from the repo root:
 
     /Applications/SuperCollider.app/Contents/MacOS/sclang \
       -l test/sc/conf.yaml test/sc/localin_isolation.scd
 
-To compile-check the engine itself, `cp lib/Engine_DX100.sc test/sc/`,
-run, then **`rm test/sc/Engine_DX100.sc`**. norns compiles every `.sc`
-under `dust/`; a duplicate class definition breaks the class library
-build and the device will not start. Never rsync `test/` to the norns.
+Compile-checking `Engine_DX100.sc` needs the real norns class library —
+do that on the device.
 
 **What works:** class-library compilation (catches syntax + unknown
 UGens), and `s.waitForBoot` + `Synth(...)` + reading a `Bus.control` with
