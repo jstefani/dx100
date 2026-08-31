@@ -43,10 +43,39 @@ local EDGES = {
 }
 
 local stack = {}
+local sounding = {} -- [root] = { engine ids }
 local grid_held = {}
 local sustain = false
 local sustained = {}
 local last_note = 48
+
+-- chord memory: intervals from the played key. "off" is a single note.
+local CHORDS = {
+  { name = "off" },
+  { name = "5th", iv = { 0, 7 } },
+  { name = "maj", iv = { 0, 4, 7 } },
+  { name = "min", iv = { 0, 3, 7 } },
+  { name = "sus2", iv = { 0, 2, 7 } },
+  { name = "sus4", iv = { 0, 5, 7 } },
+  { name = "aug", iv = { 0, 4, 8 } },
+  { name = "dim", iv = { 0, 3, 6 } },
+  { name = "maj6", iv = { 0, 4, 7, 9 } },
+  { name = "min6", iv = { 0, 3, 7, 9 } },
+  { name = "7", iv = { 0, 4, 7, 10 } },
+  { name = "maj7", iv = { 0, 4, 7, 11 } },
+  { name = "min7", iv = { 0, 3, 7, 10 } },
+  { name = "dim7", iv = { 0, 3, 6, 9 } },
+  { name = "m7b5", iv = { 0, 3, 6, 10 } },
+  { name = "add9", iv = { 0, 4, 7, 14 } },
+  { name = "m add9", iv = { 0, 3, 7, 14 } },
+  { name = "9", iv = { 0, 4, 7, 10, 14 } },
+  { name = "maj9", iv = { 0, 4, 7, 11, 14 } },
+  { name = "min9", iv = { 0, 3, 7, 10, 14 } },
+  { name = "6/9", iv = { 0, 4, 7, 9, 14 } },
+}
+local CHORD_NAMES = {}
+for i = 1, #CHORDS do CHORD_NAMES[i] = CHORDS[i].name end
+local INV_NAMES = { "off", "1st", "2nd", "3rd", "4th" }
 local cur_op = 1
 local focus_t = 0
 local hud = nil
@@ -82,24 +111,87 @@ end
 
 -- ---------- note handling ----------
 
-local function send_note(note, vel, legato)
-  local hz = MusicUtil.note_num_to_freq(note)
-  vel = vel or 0.85
-  if is_poly() then
-    engine.note_on(note, hz, vel, 0, 1)
-  else
-    engine.note_on(0, hz, vel, legato and 1 or 0, legato and 0 or 1)
+local function chord_active()
+  return params:get("chord") > 1
+end
+
+local function chord_notes(root)
+  local spec = CHORDS[params:get("chord")]
+  if spec == nil or spec.iv == nil then
+    return { root }
   end
-  last_note = note
+  local notes = {}
+  for i = 1, #spec.iv do
+    notes[i] = root + spec.iv[i]
+  end
+  local inv = util.clamp(params:get("inversion") - 1, 0, math.max(0, #notes - 1))
+  for _ = 1, inv do
+    local n = table.remove(notes, 1)
+    table.insert(notes, n + 12)
+  end
+  local out = {}
+  for i = 1, #notes do
+    if notes[i] >= 0 and notes[i] <= 127 then
+      out[#out + 1] = notes[i]
+    end
+  end
+  if #out == 0 then out[1] = root end
+  return out
+end
+
+local function stop_chord(root)
+  local ids = sounding[root]
+  if ids == nil then return end
+  for i = 1, #ids do
+    engine.note_off(ids[i])
+  end
+  sounding[root] = nil
+end
+
+local function start_chord(root, vel, legato)
+  vel = vel or 0.85
+  stop_chord(root)
+  local notes = chord_notes(root)
+  local ids = {}
+  local poly_ids = is_poly() or chord_active()
+  if not poly_ids then
+    engine.note_on(0, MusicUtil.note_num_to_freq(notes[1]), vel,
+      legato and 1 or 0, legato and 0 or 1)
+    ids[1] = 0
+  else
+    if (not is_poly()) and chord_active() then
+      for r, _ in pairs(sounding) do
+        if r ~= root then stop_chord(r) end
+      end
+    end
+    for slot, n in ipairs(notes) do
+      local id = chord_active() and (root + slot * 128) or n
+      engine.note_on(id, MusicUtil.note_num_to_freq(n), vel, 0, 1)
+      ids[slot] = id
+    end
+  end
+  sounding[root] = ids
+  last_note = root
   screen_dirty = true
   grid_dirty = true
+end
+
+local function revoice_held()
+  if #stack == 0 then return end
+  if is_poly() then
+    for i = 1, #stack do
+      start_chord(stack[i], 0.85, false)
+    end
+  else
+    start_chord(stack[#stack], 0.85, false)
+  end
 end
 
 local function note_on(note, vel)
   note = util.clamp(math.floor(note + 0.5), 0, 127)
   local legato = (not is_poly()) and (#stack > 0)
   table.insert(stack, note)
-  send_note(note, vel or 0.85, legato)
+  start_chord(note, vel or 0.85, legato)
 end
 
 local function remove_stack(note)
@@ -115,23 +207,17 @@ local function note_off(note)
     return
   end
   remove_stack(note)
-  if is_poly() then
-    engine.note_off(note)
-    grid_dirty = true
-    screen_dirty = true
-    return
+  stop_chord(note)
+  if (not is_poly()) and #stack > 0 then
+    start_chord(stack[#stack], 0.85, true)
   end
-  if #stack > 0 then
-    send_note(stack[#stack], 0.85, true)
-  else
-    engine.note_off(0)
-    grid_dirty = true
-    screen_dirty = true
-  end
+  grid_dirty = true
+  screen_dirty = true
 end
 
 local function all_off()
   stack = {}
+  sounding = {}
   sustained = {}
   grid_held = {}
   engine.note_off_all()
@@ -366,7 +452,15 @@ function redraw()
   end
   screen.level(is_poly() and 6 or 4)
   screen.move(127, 7)
-  screen.text_right(is_poly() and ("poly " .. #stack) or "mono")
+  local ch_h = params:get("chord")
+  if ch_h > 1 then
+    local s = CHORDS[ch_h].name
+    local inv = params:get("inversion")
+    if inv > 1 then s = s .. " " .. INV_NAMES[inv] end
+    screen.text_right(s)
+  else
+    screen.text_right(is_poly() and ("poly " .. #stack) or "mono")
+  end
 
   draw_algo(2, 12)
 
@@ -740,6 +834,18 @@ function init()
     flash("VOICE", ({ "mono", "poly" })[x])
   end)
   params:set_save("voice_mode", true)
+  params:add_option("chord", "chord", CHORD_NAMES, 1)
+  params:set_action("chord", function(x)
+    revoice_held()
+    flash("CHORD", CHORD_NAMES[x])
+    screen_dirty = true
+  end)
+  params:add_option("inversion", "inversion", INV_NAMES, 1)
+  params:set_action("inversion", function(x)
+    revoice_held()
+    flash("INV", INV_NAMES[x])
+    screen_dirty = true
+  end)
   params:add_number("port_time", "portamento", 0, 99, 0)
   params:set_action("port_time", function(x)
     engine.port(x == 0 and 0 or util.linexp(1, 99, 0.01, 2, x))
