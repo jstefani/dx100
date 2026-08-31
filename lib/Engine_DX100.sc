@@ -286,13 +286,14 @@ Engine_DX100 : CroneEngine {
 			Out.ar(out, Pan2.ar(snd, Lag.kr(pan, 0.08)));
 		}).add;
 
-		// ---- character / output fx, ONE instance for the whole synth ----
-		// Runs once on the summed voice bus. Everything here is a nonlinear
-		// or sample-destroying process, and all of them must see the mix
-		// rather than individual voices (see the note in \dx100 above).
+		// ---- output fx, ONE instance for the whole synth ----
+		// Runs once on the summed voice bus. Nonlinear / sample-destroying
+		// processes must see the mix, not individual voices (see \dx100).
+		// Chorus/phaser live here too — cheaper, and one LFO for the mix.
 		SynthDef(\dx100fx, {
-			arg in, out, hiss = 0, bits = 0, srate = 0, drive = 0, glitch = 0;
-			var snd, b, sr;
+			arg in, out, hiss = 0, bits = 0, srate = 0, drive = 0, glitch = 0,
+			chorus = 0, chorusRate = 0.4, phaser = 0, phaserRate = 0.2;
+			var snd, b, sr, chMix, chRate, chDep, chWet, phMix, phRate, phFreq, phWet;
 
 			snd = In.ar(in, 2);
 
@@ -321,6 +322,28 @@ Engine_DX100 : CroneEngine {
 				[snd, Latch.ar(snd,
 					Impulse.ar(LFNoise0.kr(6).range(200, 9000)))]);
 
+			// stereo chorus: two delayed taps, LFO phase offset per channel
+			chMix = Lag.kr(chorus, 0.08).clip(0, 1);
+			chRate = Lag.kr(chorusRate, 0.08).clip(0.03, 8);
+			chDep = 0.0016 + (chMix * 0.0022);
+			chWet = (
+				DelayC.ar(snd, 0.05,
+					(0.009 + (chDep * SinOsc.kr(chRate, [0, 2pi / 3]))).clip(0.001, 0.04))
+				+ DelayC.ar(snd, 0.05,
+					(0.015 + (chDep * SinOsc.kr(chRate * 0.87, [pi / 2, pi]))).clip(0.001, 0.04))
+			) * 0.5;
+			snd = snd + (chWet * chMix * 0.7);
+
+			// 4-stage stereo phaser, triangle LFO, offset L/R
+			phMix = Lag.kr(phaser, 0.08).clip(0, 1);
+			phRate = Lag.kr(phaserRate, 0.08).clip(0.02, 4);
+			phFreq = LFTri.kr(phRate, [0, 0.6]).exprange(160, 1700);
+			phWet = snd;
+			4.do({
+				phWet = BAllPass.ar(phWet, phFreq, 0.6);
+			});
+			snd = snd + (phWet * phMix * 0.55);
+
 			// catch the summed peaks that no per-voice trim can reach.
 			snd = Limiter.ar(LeakDC.ar(snd), 0.95, 0.01);
 			Out.ar(out, snd);
@@ -348,8 +371,8 @@ Engine_DX100 : CroneEngine {
 			\k1, \k2, \k3, \k4,
 			\v1, \v2, \v3, \v4,
 			\rateScale
-			// NOTE: drive/hiss/bits/srate/glitch are NOT here -- they are
-			// fx-synth controls now, set directly on `fx`.
+			// NOTE: drive/hiss/bits/srate/glitch/chorus/phaser are NOT
+			// here -- they are fx-synth controls, set directly on `fx`.
 		].do({ arg name;
 			ctlBus.put(name, Bus.control(context.server));
 		});
@@ -407,7 +430,8 @@ Engine_DX100 : CroneEngine {
 		headroom = 1.0;
 
 		// character controls live on the single fx synth
-		[\hiss, \bits, \srate, \drive, \glitch].do({ arg name;
+		[\hiss, \bits, \srate, \drive, \glitch,
+			\chorus, \chorusRate, \phaser, \phaserRate].do({ arg name;
 			this.addCommand(name, "f", { arg msg;
 				fx.set(name, msg[1]);
 			});
