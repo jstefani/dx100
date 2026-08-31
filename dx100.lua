@@ -146,6 +146,7 @@ local function load_preset(idx)
   if p == nil then return end
   params:set("algo", p.algo)
   params:set("feedback", math.floor(p.fb * 99 + 0.5))
+  params:set("dx_feedback", 0)
   params:set("transpose", p.transpose or 0)
   for i = 1, OPS do
     local o = p.ops[i]
@@ -177,6 +178,7 @@ local function rnd_voice()
   local algo = math.random(1, ALGOS)
   params:set("algo", algo)
   params:set("feedback", math.random(0, 85))
+  params:set("dx_feedback", (math.random() < 0.35) and math.random(0, 80) or 0)
   for i = 1, OPS do
     local carrier = false
     for _, c in ipairs(CARRIERS[algo]) do
@@ -245,11 +247,12 @@ local function draw_algo(ox, oy)
     screen.stroke()
   end
 
-  -- feedback loop marker on op4
-  if params:get("feedback") > 0 then
+  -- feedback loop marker on op4 (either flavor)
+  local fb_show = math.max(params:get("feedback"), params:get("dx_feedback"))
+  if fb_show > 0 then
     local f = lay[4]
     local fx, fy = nx(f[1]), ny(f[2])
-    screen.level(util.round(util.linlin(0, 99, 2, 12, params:get("feedback"))))
+    screen.level(util.round(util.linlin(0, 99, 2, 12, fb_show)))
     screen.move(fx + 8, fy + 1)
     screen.line(fx + 11, fy + 1)
     screen.line(fx + 11, fy + 7)
@@ -354,7 +357,13 @@ function redraw()
   screen.move(35, 7)
   screen.text("ALG " .. params:get("algo"))
   screen.move(70, 7)
-  screen.text("FB " .. params:get("feedback"))
+  local fb_h = params:get("feedback")
+  local dx_h = params:get("dx_feedback")
+  if dx_h > 0 then
+    screen.text("FB " .. fb_h .. "/" .. dx_h)
+  else
+    screen.text("FB " .. fb_h)
+  end
   screen.level(is_poly() and 6 or 4)
   screen.move(127, 7)
   screen.text_right(is_poly() and ("poly " .. #stack) or "mono")
@@ -598,6 +607,11 @@ function init()
   params:set_action("feedback", function(x)
     engine.feedback(x / 99)
     flash("FEEDBACK", x)
+  end)
+  params:add_number("dx_feedback", "dx feedback", 0, 99, 0)
+  params:set_action("dx_feedback", function(x)
+    engine.dxFeedback(x / 99)
+    flash("DX FB", x)
   end)
   params:add_number("transpose", "transpose", -24, 24, 0)
   params:set_action("transpose", function(x)

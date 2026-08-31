@@ -24,7 +24,7 @@ Engine_DX100 : CroneEngine {
 		SynthDef(\dx100, {
 			arg out, hz = 220, gate = 0, vel = 1, legato = 0, t_trig = 0,
 			persist = 0, killGate = 1, voiceScale = 1, headroom = 1,
-			algo = 0, feedback = 0, amp = 0.4, pan = 0, transpose = 0,
+			algo = 0, feedback = 0, dxFeedback = 0, amp = 0.4, pan = 0, transpose = 0,
 			port = 0, portMode = 0,
 			lfoRate = 4, lfoWave = 0, lfoDelay = 0, pms = 0, ams = 0,
 			pitchEgAmt = 0, pitchEgRate = 0.5, pitchEgLevel = 0,
@@ -50,7 +50,7 @@ Engine_DX100 : CroneEngine {
 			var freq, slide, envGate, kill, keyTrack, velAmt;
 			var lfo, lfoEnv, pitchEg, pmod, amod;
 			var ratios, dets, fixed, fixedHz, waves, levels;
-			var oscFreq, envs, ops, snd, fb, fbBuf;
+			var oscFreq, envs, ops, snd, fb, fbBuf, dxAmt, dxSeed, dxPh;
 			var opWave, mkEnv, rateTime, out1, out2, out3, out4;
 			var m, carrierSum, nCarriers, algSel;
 
@@ -191,11 +191,22 @@ Engine_DX100 : CroneEngine {
 			};
 
 			// ---- operator 4 with feedback ----
-			// op4 phase-modulates itself; clip the loop so a stray non-finite
-			// sample can never latch the voice into silence.
+			// Two self-mod paths. They add; either or both can be 0.
+			//
+			// `feedback`: post-envelope LocalIn, 1-block delay, clipped.
+			// Index rides the EG — harsh, enveloped. Its own flavor.
+			//
+			// `dxFeedback`: Yamaha 4-op (DX100 fb 0–7). Self-PM of the
+			// raw oscillator, envelope after, so the wave stays put and
+			// the EG is a VCA. 0-delay iterated sin (norns LocalIn is
+			// 16 samples, which is why the other path isn't a saw).
+			// β=π at 1.0 — sine folds toward a saw, like hardware at 7.
 			fbBuf = LocalIn.ar(1).clip2(1.0);
 			fb = fbBuf * Lag.kr(feedback, 0.05).clip(0, 1) * 6;
-			out4 = opWave.(fb, waves[3], oscFreq[3]) * envs[3]
+			dxAmt = Lag.kr(dxFeedback, 0.05).clip(0, 1);
+			dxSeed = SinOsc.ar(oscFreq[3], fb);
+			dxPh = dxAmt * pi * SinOsc.ar(oscFreq[3], fb + (dxAmt * pi * dxSeed));
+			out4 = opWave.(fb + dxPh, waves[3], oscFreq[3]) * envs[3]
 				* Lag.kr(levels[3], 0.03) * amod;
 			LocalOut.ar(out4.clip2(1.0));
 
@@ -319,7 +330,7 @@ Engine_DX100 : CroneEngine {
 
 		ctlBus = Dictionary.new;
 		[
-			\algo, \feedback, \amp, \pan, \transpose,
+			\algo, \feedback, \dxFeedback, \amp, \pan, \transpose,
 			\port, \portMode,
 			\lfoRate, \lfoWave, \lfoDelay, \pms, \ams,
 			\pitchEgAmt, \pitchEgRate, \pitchEgLevel,
@@ -346,6 +357,7 @@ Engine_DX100 : CroneEngine {
 		// defaults (a serviceable electric bass, DX100 preset 1 territory)
 		ctlBus[\algo].setSynchronous(0);
 		ctlBus[\feedback].setSynchronous(0.4);
+		ctlBus[\dxFeedback].setSynchronous(0);
 		ctlBus[\amp].setSynchronous(0.4);
 		ctlBus[\pan].setSynchronous(0);
 		ctlBus[\transpose].setSynchronous(0);
