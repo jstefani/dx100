@@ -5,13 +5,27 @@ SuperCollider lives at
 no `sclang` on PATH.
 
 `CroneStub.sc` stubs `CroneEngine` so `lib/Engine_DX100.sc` compiles off
-the norns. To compile-check the engine, copy it in beside the stub:
+the norns.
+
+**Never deploy `test/` to the norns, and never leave a copy of
+`Engine_DX100.sc` in here.** norns compiles every `.sc` file under
+`dust/`, so a second copy of the class is a duplicate definition: the
+class library fails to build and *the device will not start*. The copy
+is gitignored for that reason.
+
+To compile-check the engine, copy it in, run, then delete it:
 
     cp lib/Engine_DX100.sc test/sc/
     /Applications/SuperCollider.app/Contents/MacOS/sclang \
       -l test/sc/conf.yaml test/sc/<script>.scd
+    rm test/sc/Engine_DX100.sc
 
 Note `conf.yaml` uses a relative includePath, so run from the repo root.
+
+Deploy with `test/` excluded:
+
+    rsync -av --exclude '.git' --exclude 'test' \
+      ./ we@norns.local:~/dust/code/dx100/
 
 ## scripts
 

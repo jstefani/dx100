@@ -1,0 +1,4 @@
+# norns compiles every .sc under dust/, so a copy of the engine class
+# anywhere but lib/ is a duplicate class definition and breaks the
+# class library build -- the device then will not start.
+test/sc/Engine_DX100.sc

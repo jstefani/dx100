@@ -27,7 +27,7 @@ f2494c3 dx100: Yamaha 4-op FM engine for norns
 ```
 
 Deployed to `we@norns.local:~/dust/code/dx100` via
-`rsync -av --exclude '.git' ./ we@norns.local:~/dust/code/dx100/`.
+`rsync -av --exclude '.git' --exclude 'test' ./ we@norns.local:~/dust/code/dx100/`.
 **`Engine_DX100.sc` is a SuperCollider class — norns must be restarted
 (SYSTEM > RESTART) for engine edits to take effect.** Lua edits only need
 a script reload.
@@ -126,7 +126,10 @@ in `test/sc/` — see `test/README.md`. Run from the repo root:
     /Applications/SuperCollider.app/Contents/MacOS/sclang \
       -l test/sc/conf.yaml test/sc/localin_isolation.scd
 
-To compile-check the engine itself, first `cp lib/Engine_DX100.sc test/sc/`.
+To compile-check the engine itself, `cp lib/Engine_DX100.sc test/sc/`,
+run, then **`rm test/sc/Engine_DX100.sc`**. norns compiles every `.sc`
+under `dust/`; a duplicate class definition breaks the class library
+build and the device will not start. Never rsync `test/` to the norns.
 
 **What works:** class-library compilation (catches syntax + unknown
 UGens), and `s.waitForBoot` + `Synth(...)` + reading a `Bus.control` with
