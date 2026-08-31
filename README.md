@@ -13,14 +13,11 @@ Copy this folder to `~/dust/code/dx100` on the norns:
 scp -r dx100 we@norns.local:~/dust/code/
 ```
 
-The directory **must** be named `dx100`. The script does
-`include("dx100/lib/presets")`, which resolves relative to `dust/code/`,
-so a differently-named folder fails to load. The git repo is
-`norns-dx100`, so a plain `git clone` into `dust/code/` gives the wrong
-name — clone to an explicit path:
+The directory **must** be named `dx100` — the script does
+`include("dx100/lib/presets")`, resolved relative to `dust/code/`:
 
 ```
-git clone git@github.com:jstefani/norns-dx100.git ~/dust/code/dx100
+git clone git@github.com:jstefani/dx100.git ~/dust/code/dx100
 ```
 
 The engine is a new SuperCollider class, so **restart norns** after copying

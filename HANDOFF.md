@@ -16,7 +16,7 @@ Reproduces on hardware (monome norns). Not yet reproduced off-device.
 
 ## Current state
 
-Repo: `git@github.com:jstefani/norns-dx100.git`, branch `master`.
+Repo: `git@github.com:jstefani/dx100.git`, branch `master`.
 
 ```
 d4a95ca add "clear noise" to reset artifact-producing settings
