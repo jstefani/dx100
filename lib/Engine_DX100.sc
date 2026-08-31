@@ -19,7 +19,7 @@ Engine_DX100 : CroneEngine {
 	alloc {
 		SynthDef(\dx100, {
 			arg out, hz = 220, gate = 0, vel = 1, legato = 0, t_trig = 0,
-			persist = 0, killGate = 1,
+			persist = 0, killGate = 1, voiceScale = 1,
 			algo = 0, feedback = 0, amp = 0.4, pan = 0, transpose = 0,
 			port = 0, portMode = 0,
 			lfoRate = 4, lfoWave = 0, lfoDelay = 0, pms = 0, ams = 0,
@@ -165,6 +165,13 @@ Engine_DX100 : CroneEngine {
 			// 3 quarter-sine, 4 alt-sine, 5 alt half, 6 sine^2ish, 7 saw-ish
 			opWave = { arg ph, w, fq;
 				var s, half, absS, quart, alt, altHalf, squared, sawish;
+				// SinOsc's phase input is only well-behaved within +/-8pi;
+				// past that its lookup wraps unpredictably and the output
+				// breaks into hard discontinuities. Modulation index * a
+				// modulator stack can run well past that, so fold the phase
+				// into one cycle first -- mathematically identical for a
+				// periodic waveform, and free of the edge artifacts.
+				ph = ph.wrap(-pi, pi);
 				s = SinOsc.ar(fq, ph);
 				half = s.max(0);
 				absS = s.abs;
@@ -283,7 +290,16 @@ Engine_DX100 : CroneEngine {
 
 			snd = LeakDC.ar(snd);
 			snd = snd * kill * Lag.kr(amp, 0.05) * vel.linlin(0, 1, 0.5, 1.0);
-			snd = snd.clip2(1.2);
+			// per-voice headroom. every voice is an independent oscillator
+			// bank, so N voices sum to roughly sqrt(N) louder on the bus.
+			// scale each voice down by the worst case up front rather than
+			// letting the sum clip -- clipping the mix is what turned chords
+			// into distortion and ring-mod grain.
+			snd = snd * Lag.kr(voiceScale, 0.03);
+			// soft saturation instead of a hard clip: hard-clip edges are
+			// broadband and read as digital grit, and a per-voice hard clip
+			// cannot protect the sum anyway.
+			snd = snd.tanh;
 			Out.ar(out, Pan2.ar(snd, Lag.kr(pan, 0.08)));
 		}).add;
 
@@ -387,6 +403,21 @@ Engine_DX100 : CroneEngine {
 		});
 	}
 
+	// N independent voices sum to about sqrt(N) louder. Scale every live
+	// voice by 1/sqrt(N) so a chord sits at roughly the level of one note
+	// instead of driving the output bus into clipping.
+	rebalance {
+		var n, scale;
+		n = voices.size.max(1);
+		scale = n.sqrt.reciprocal;
+		voices.do({ arg syn;
+			if(syn.notNil and: { syn.isPlaying }, {
+				syn.set(\voiceScale, scale);
+			});
+		});
+		^scale;
+	}
+
 	noteOn { arg id, hz, vel, legato, trig;
 		var syn, args, persist;
 		if(poly == 0, { id = 0 });
@@ -409,6 +440,8 @@ Engine_DX100 : CroneEngine {
 			ctlBus.keysValuesDo({ arg name, bus;
 				args = args.add(name).add(bus.getSynchronous);
 			});
+			args = args.add(\voiceScale).add(
+				(voices.size + 1).max(1).sqrt.reciprocal);
 			syn = Synth(\dx100, args, gr);
 			ctlBus.keys.do({ arg name;
 				syn.map(name, ctlBus[name]);
@@ -417,9 +450,12 @@ Engine_DX100 : CroneEngine {
 			syn.onFree({
 				voices.removeAt(id);
 				voiceOrder.remove(id);
+				// a freed voice leaves more headroom for the rest
+				this.rebalance;
 			});
 			voices.put(id, syn);
 			voiceOrder.add(id);
+			this.rebalance;
 		});
 	}
 
