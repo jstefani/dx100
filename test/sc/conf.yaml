@@ -1,0 +1,4 @@
+includePaths:
+  - ./test/sc
+excludeDefaultPaths: false
+postInlineWarnings: false
