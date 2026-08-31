@@ -292,10 +292,20 @@ Engine_DX100 : CroneEngine {
 		// Chorus/phaser live here too — cheaper, and one LFO for the mix.
 		SynthDef(\dx100fx, {
 			arg in, out, hiss = 0, bits = 0, srate = 0, drive = 0, glitch = 0,
-			chorus = 0, chorusRate = 0.4, phaser = 0, phaserRate = 0.2;
-			var snd, b, sr, chMix, chRate, chDep, chWet, phMix, phRate, phFreq, phWet;
+			chorus = 0, chorusRate = 0.4, chorusWidth = 0.5,
+			phaser = 0, phaserRate = 0.2, phaserWidth = 0.5;
+			var snd, b, sr, widen;
+			var chMix, chRate, chDep, chW, chWet, haas, chPhase;
+			var phMix, phRate, phW, phFreq, phWet;
 
 			snd = In.ar(in, 2);
+			// 0 = mid only, 1 = unchanged, >1 extra side (3.2 at width 99)
+			widen = { arg sig, w;
+				var mid, side;
+				mid = (sig[0] + sig[1]) * 0.5;
+				side = (sig[0] - sig[1]) * 0.5 * w;
+				[mid + side, mid - side];
+			};
 
 			snd = snd + (PinkNoise.ar * Lag.kr(hiss, 0.08) * 0.012);
 
@@ -322,26 +332,43 @@ Engine_DX100 : CroneEngine {
 				[snd, Latch.ar(snd,
 					Impulse.ar(LFNoise0.kr(6).range(200, 9000)))]);
 
-			// stereo chorus: two delayed taps, LFO phase offset per channel
+			// stereo chorus: two delayed taps. width 0 = mono,
+			// 1 = Haas ~26ms + opposite LFO + 3.2x M/S.
 			chMix = Lag.kr(chorus, 0.08).clip(0, 1);
 			chRate = Lag.kr(chorusRate, 0.08).clip(0.03, 8);
+			chW = Lag.kr(chorusWidth, 0.08).clip(0, 1);
 			chDep = 0.0016 + (chMix * 0.0022);
+			chPhase = chW * pi;
+			haas = chW.pow(1.4) * 0.026;
 			chWet = (
-				DelayC.ar(snd, 0.05,
-					(0.009 + (chDep * SinOsc.kr(chRate, [0, 2pi / 3]))).clip(0.001, 0.04))
-				+ DelayC.ar(snd, 0.05,
-					(0.015 + (chDep * SinOsc.kr(chRate * 0.87, [pi / 2, pi]))).clip(0.001, 0.04))
+				DelayC.ar(snd, 0.08, (
+					[0.009, 0.009 + haas]
+					+ (chDep * SinOsc.kr(chRate, [0, chPhase * 2 / 3]))
+				).clip(0.001, 0.07))
+				+ DelayC.ar(snd, 0.08, (
+					[0.015, 0.015 + (haas * 0.7)]
+					+ (chDep * SinOsc.kr(chRate * 0.87, [pi / 2, pi / 2 + chPhase]))
+				).clip(0.001, 0.07))
 			) * 0.5;
+			chWet = widen.(chWet, chW * 3.2);
 			snd = snd + (chWet * chMix * 0.7);
 
-			// 4-stage stereo phaser, triangle LFO, offset L/R
+			// 4-stage phaser. width 0 = same sweep both channels,
+			// 1 = opposite LFO, split ranges, 3.2x M/S.
 			phMix = Lag.kr(phaser, 0.08).clip(0, 1);
 			phRate = Lag.kr(phaserRate, 0.08).clip(0.02, 4);
-			phFreq = LFTri.kr(phRate, [0, 0.6]).exprange(160, 1700);
+			phW = Lag.kr(phaserWidth, 0.08).clip(0, 1);
+			phFreq = [
+				LFTri.kr(phRate, 0).exprange(
+					160 / (1 + (phW * 0.5)), 1700 * (1 + phW)),
+				LFTri.kr(phRate, phW * 0.5).exprange(
+					160 * (1 + (phW * 2.2)), 1700 * (1 + (phW * 2)))
+			];
 			phWet = snd;
 			4.do({
 				phWet = BAllPass.ar(phWet, phFreq, 0.6);
 			});
+			phWet = widen.(phWet, phW * 3.2);
 			snd = snd + (phWet * phMix * 0.55);
 
 			// catch the summed peaks that no per-voice trim can reach.
@@ -431,7 +458,8 @@ Engine_DX100 : CroneEngine {
 
 		// character controls live on the single fx synth
 		[\hiss, \bits, \srate, \drive, \glitch,
-			\chorus, \chorusRate, \phaser, \phaserRate].do({ arg name;
+			\chorus, \chorusRate, \chorusWidth,
+			\phaser, \phaserRate, \phaserWidth].do({ arg name;
 			this.addCommand(name, "f", { arg msg;
 				fx.set(name, msg[1]);
 			});
