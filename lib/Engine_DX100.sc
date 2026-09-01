@@ -8,13 +8,16 @@ Engine_DX100 : CroneEngine {
 
 	var <gr;
 	var <fxBus;
-	var <fx;
+	var <fxGroup;
+	var <fxChar, <fxChorus, <fxPhaser, <fxOut;
 	var <voices;
 	var <voiceOrder;
 	var <ctlBus;
 	var <poly;
 	var <scaleExp;
 	var <headroom;
+	var fxAlive;
+	var charMix, chorusMix, phaserMix;
 
 	*new { arg context, doneCallback;
 		^super.new(context, doneCallback);
@@ -271,7 +274,7 @@ Engine_DX100 : CroneEngine {
 
 			// ---- output stage ----
 			// The character section (hiss/bits/srate/drive/glitch) lives in
-			// the \dx100fx synth downstream, NOT here. Applying it per voice
+			// the post-mix fx synths downstream, NOT here. Applying it per voice
 			// quantizes each voice separately and sums the results, which is
 			// not the same as quantizing the mix: the error products are
 			// uncorrelated between voices and beat against each other.
@@ -286,29 +289,16 @@ Engine_DX100 : CroneEngine {
 			Out.ar(out, Pan2.ar(snd, Lag.kr(pan, 0.08)));
 		}).add;
 
-		// ---- output fx, ONE instance for the whole synth ----
-		// Runs once on the summed voice bus. Nonlinear / sample-destroying
-		// processes must see the mix, not individual voices (see \dx100).
-		// Chorus/phaser live here too — cheaper, and one LFO for the mix.
-		SynthDef(\dx100fx, {
-			arg in, out, hiss = 0, bits = 0, srate = 0, drive = 0, glitch = 0,
-			chorus = 0, chorusRate = 0.4, chorusWidth = 0.5,
-			phaser = 0, phaserRate = 0.2, phaserWidth = 0.5;
-			var snd, b, sr, widen;
-			var chMix, chRate, chDep, chW, chWet, haas, chPhase;
-			var phMix, phRate, phW, phFreq, phWet;
-
-			snd = In.ar(in, 2);
-			// 0 = mid only, 1 = unchanged, >1 extra side (3.2 at width 99)
-			widen = { arg sig, w;
-				var mid, side;
-				mid = (sig[0] + sig[1]) * 0.5;
-				side = (sig[0] - sig[1]) * 0.5 * w;
-				[mid + side, mid - side];
-			};
-
+		// ---- post-mix fx, one insert per section ----
+		// Nonlinear / sample-destroying processes must see the mix, not
+		// individual voices (see \dx100). SelectX still runs both branches,
+		// so unused sections are separate synths paused with /n_run.
+		// Order: character -> chorus -> phaser -> limiter/out.
+		SynthDef(\dx100char, {
+			arg bus, hiss = 0, bits = 0, srate = 0, drive = 0, glitch = 0;
+			var snd, b, sr;
+			snd = In.ar(bus, 2);
 			snd = snd + (PinkNoise.ar * Lag.kr(hiss, 0.08) * 0.012);
-
 			// 12-bit-ish DAC crunch of the originals.
 			// core UGens only -- no SC3-plugins dependency.
 			b = Lag.kr(bits, 0.08).clip(0, 1);
@@ -316,22 +306,24 @@ Engine_DX100 : CroneEngine {
 				snd,
 				(snd * (2 ** (12 - (b * 6)))).round(1.0) / (2 ** (12 - (b * 6)))
 			]);
-
 			sr = Lag.kr(srate, 0.08).clip(0, 1);
 			snd = SelectX.ar(sr, [
 				snd,
 				Latch.ar(snd, Impulse.ar(sr.linexp(0.001, 1, 24000, 1500)))
 			]);
-
 			drive = Lag.kr(drive, 0.05);
 			snd = SelectX.ar(drive.clip(0, 1),
 				[snd, (snd * (1 + (drive * 8))).tanh * 0.7]);
-
-			// digital glitch: occasional sample-hold stutter
 			snd = SelectX.ar(Lag.kr(glitch, 0.1).clip(0, 1),
 				[snd, Latch.ar(snd,
 					Impulse.ar(LFNoise0.kr(6).range(200, 9000)))]);
+			ReplaceOut.ar(bus, snd);
+		}).add;
 
+		SynthDef(\dx100chorus, {
+			arg bus, chorus = 0, chorusRate = 0.4, chorusWidth = 0.5;
+			var snd, chMix, chRate, chDep, chW, chWet, haas, chPhase, mid, side;
+			snd = In.ar(bus, 2);
 			// stereo chorus: two delayed taps. width 0 = mono,
 			// 1 = Haas ~26ms + opposite LFO + 3.2x M/S.
 			chMix = Lag.kr(chorus, 0.08).clip(0, 1);
@@ -350,9 +342,16 @@ Engine_DX100 : CroneEngine {
 					+ (chDep * SinOsc.kr(chRate * 0.87, [pi / 2, pi / 2 + chPhase]))
 				).clip(0.001, 0.07))
 			) * 0.5;
-			chWet = widen.(chWet, chW * 3.2);
-			snd = snd + (chWet * chMix * 0.7);
+			mid = (chWet[0] + chWet[1]) * 0.5;
+			side = (chWet[0] - chWet[1]) * 0.5 * (chW * 3.2);
+			chWet = [mid + side, mid - side];
+			ReplaceOut.ar(bus, snd + (chWet * chMix * 0.7));
+		}).add;
 
+		SynthDef(\dx100phaser, {
+			arg bus, phaser = 0, phaserRate = 0.2, phaserWidth = 0.5;
+			var snd, phMix, phRate, phW, phFreq, phWet, mid, side;
+			snd = In.ar(bus, 2);
 			// 4-stage phaser. width 0 = same sweep both channels,
 			// 1 = opposite LFO, split ranges, 3.2x M/S.
 			phMix = Lag.kr(phaser, 0.08).clip(0, 1);
@@ -368,10 +367,16 @@ Engine_DX100 : CroneEngine {
 			4.do({
 				phWet = BAllPass.ar(phWet, phFreq, 0.6);
 			});
-			phWet = widen.(phWet, phW * 3.2);
-			snd = snd + (phWet * phMix * 0.55);
+			mid = (phWet[0] + phWet[1]) * 0.5;
+			side = (phWet[0] - phWet[1]) * 0.5 * (phW * 3.2);
+			phWet = [mid + side, mid - side];
+			ReplaceOut.ar(bus, snd + (phWet * phMix * 0.55));
+		}).add;
 
-			// catch the summed peaks that no per-voice trim can reach.
+		SynthDef(\dx100out, {
+			arg bus, out;
+			var snd;
+			snd = In.ar(bus, 2);
 			snd = Limiter.ar(LeakDC.ar(snd), 0.95, 0.01);
 			Out.ar(out, snd);
 		}).add;
@@ -399,7 +404,7 @@ Engine_DX100 : CroneEngine {
 			\v1, \v2, \v3, \v4,
 			\rateScale
 			// NOTE: drive/hiss/bits/srate/glitch/chorus/phaser are NOT
-			// here -- they are fx-synth controls, set directly on `fx`.
+			// here -- they are post-mix insert controls, not voice buses.
 		].do({ arg name;
 			ctlBus.put(name, Bus.control(context.server));
 		});
@@ -444,24 +449,70 @@ Engine_DX100 : CroneEngine {
 		});
 		ctlBus[\rateScale].setSynchronous(0);
 
-		// voices -> private stereo bus -> single fx synth -> norns out.
+		// voices -> private stereo bus -> gated inserts -> limiter/out.
 		fxBus = Bus.audio(context.server, 2);
 		gr = ParGroup.tail(context.xg);
-		fx = Synth.tail(context.xg, \dx100fx,
-			[\in, fxBus.index, \out, context.out_b.index]);
+		fxGroup = Group.tail(context.xg);
+		fxChar = Synth.tail(fxGroup, \dx100char, [\bus, fxBus.index]);
+		fxChorus = Synth.tail(fxGroup, \dx100chorus, [\bus, fxBus.index]);
+		fxPhaser = Synth.tail(fxGroup, \dx100phaser, [\bus, fxBus.index]);
+		fxOut = Synth.tail(fxGroup, \dx100out,
+			[\bus, fxBus.index, \out, context.out_b.index]);
+		fxAlive = true;
+		charMix = IdentityDictionary[
+			\hiss -> 0, \bits -> 0, \srate -> 0, \drive -> 0, \glitch -> 0
+		];
+		chorusMix = 0;
+		phaserMix = 0;
 		context.server.sync;
+		fxChar.run(false);
+		fxChorus.run(false);
+		fxPhaser.run(false);
 		voices = Dictionary.new;
 		voiceOrder = List.new;
 		poly = 1;
 		scaleExp = 0.5;
 		headroom = 1.0;
 
-		// character controls live on the single fx synth
-		[\hiss, \bits, \srate, \drive, \glitch,
-			\chorus, \chorusRate, \chorusWidth,
-			\phaser, \phaserRate, \phaserWidth].do({ arg name;
+		[\hiss, \bits, \srate, \drive, \glitch].do({ arg name;
 			this.addCommand(name, "f", { arg msg;
-				fx.set(name, msg[1]);
+				charMix[name] = msg[1];
+				fxChar.set(name, msg[1]);
+				if(charMix.values.any({ arg v; v > 0 }), {
+					fxChar.run(true);
+				}, {
+					this.sleepFx(fxChar, {
+						charMix.values.any({ arg v; v > 0 }).not
+					});
+				});
+			});
+		});
+		this.addCommand("chorus", "f", { arg msg;
+			chorusMix = msg[1];
+			fxChorus.set(\chorus, chorusMix);
+			if(chorusMix > 0, {
+				fxChorus.run(true);
+			}, {
+				this.sleepFx(fxChorus, { chorusMix <= 0 });
+			});
+		});
+		[\chorusRate, \chorusWidth].do({ arg name;
+			this.addCommand(name, "f", { arg msg;
+				fxChorus.set(name, msg[1]);
+			});
+		});
+		this.addCommand("phaser", "f", { arg msg;
+			phaserMix = msg[1];
+			fxPhaser.set(\phaser, phaserMix);
+			if(phaserMix > 0, {
+				fxPhaser.run(true);
+			}, {
+				this.sleepFx(fxPhaser, { phaserMix <= 0 });
+			});
+		});
+		[\phaserRate, \phaserWidth].do({ arg name;
+			this.addCommand(name, "f", { arg msg;
+				fxPhaser.set(name, msg[1]);
 			});
 		});
 
@@ -591,9 +642,18 @@ Engine_DX100 : CroneEngine {
 		voices.removeAt(id);
 	}
 
+	// Pause after mix lag (80–100ms) so the wet fade finishes first.
+	sleepFx { arg syn, stillOff;
+		SystemClock.sched(0.12, {
+			if(fxAlive and: { stillOff.value }, { syn.run(false) });
+			nil;
+		});
+	}
+
 	free {
+		fxAlive = false;
 		gr.free;
-		fx.free;
+		fxGroup.free;
 		fxBus.free;
 		ctlBus.do({ arg b; b.free });
 	}
