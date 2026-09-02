@@ -1,7 +1,7 @@
 // Engine_DX100
 // Yamaha 4-operator FM (DX100 / DX21 / DX27 / TX81Z) style.
 // 8 algorithms, per-op rate/level envelopes, feedback on op4,
-// TX81Z-style operator waveforms, LFO with AMS/PMS.
+// TX81Z-style operator waveforms, LFO with AMS/PMS/ALMS.
 
 Engine_DX100 : CroneEngine {
 	classvar <maxVoices = 8;
@@ -29,7 +29,7 @@ Engine_DX100 : CroneEngine {
 			persist = 0, killGate = 1, voiceScale = 1, headroom = 1,
 			algo = 0, feedback = 0, dxFeedback = 0, amp = 0.4, pan = 0, transpose = 0,
 			port = 0, portMode = 0,
-			lfoRate = 4, lfoWave = 0, lfoDelay = 0, pms = 0, ams = 0,
+			lfoRate = 4, lfoWave = 0, lfoDelay = 0, pms = 0, ams = 0, alms = 0,
 			pitchEgAmt = 0, pitchEgRate = 0.5, pitchEgLevel = 0,
 			// per-operator: ratio, detune (cents), fixed hz, fixed mode, wave, level
 			r1 = 1, r2 = 1, r3 = 1, r4 = 1,
@@ -234,7 +234,9 @@ Engine_DX100 : CroneEngine {
 			// per voice (every algorithm, every sample). A releasing tail
 			// costs the same as a held note, so any overlap doubled CPU.
 
-			algSel = algo.round.clip(0, 7);
+			// algorithm mod (ALMS): LFO walks the 8 algorithms around the
+			// selected one. depth 1 = ±7 steps (full set, wraps). 0 = stay.
+			algSel = (algo + (lfo * Lag.kr(alms, 0.05) * 7)).round.wrap(0, 8);
 
 			// op3: modulated by op4 in algs 1, 4, 5, 6, 7
 			out3 = opWave.(Select.ar(algSel, [
@@ -258,7 +260,7 @@ Engine_DX100 : CroneEngine {
 				* envs[0] * Lag.kr(levels[0], 0.03) * amod;
 
 			// which ops reach the output, per algorithm
-			carrierSum = Select.ar(algo.round.clip(0, 7), [
+			carrierSum = Select.ar(algSel, [
 				out1,                        // 1
 				out1,                        // 2
 				out1,                        // 3
@@ -268,7 +270,7 @@ Engine_DX100 : CroneEngine {
 				out1 + out2 + out3,          // 7
 				out1 + out2 + out3 + out4    // 8
 			]);
-			nCarriers = Select.kr(algo.round.clip(0, 7),
+			nCarriers = Select.kr(algSel,
 				[1, 1, 1, 1, 2, 3, 3, 4]);
 			snd = carrierSum / nCarriers.sqrt;
 
@@ -387,7 +389,7 @@ Engine_DX100 : CroneEngine {
 		[
 			\algo, \feedback, \dxFeedback, \amp, \pan, \transpose,
 			\port, \portMode,
-			\lfoRate, \lfoWave, \lfoDelay, \pms, \ams,
+			\lfoRate, \lfoWave, \lfoDelay, \pms, \ams, \alms,
 			\pitchEgAmt, \pitchEgRate, \pitchEgLevel,
 			\r1, \r2, \r3, \r4,
 			\d1, \d2, \d3, \d4,
@@ -423,6 +425,7 @@ Engine_DX100 : CroneEngine {
 		ctlBus[\lfoDelay].setSynchronous(0);
 		ctlBus[\pms].setSynchronous(0);
 		ctlBus[\ams].setSynchronous(0);
+		ctlBus[\alms].setSynchronous(0);
 		ctlBus[\pitchEgAmt].setSynchronous(0);
 		ctlBus[\pitchEgRate].setSynchronous(0.5);
 		ctlBus[\pitchEgLevel].setSynchronous(0);
