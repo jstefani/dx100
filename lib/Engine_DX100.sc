@@ -1,7 +1,8 @@
 // Engine_DX100
 // Yamaha 4-operator FM (DX100 / DX21 / DX27 / TX81Z) style.
 // 8 algorithms, per-op rate/level envelopes, feedback on op4,
-// TX81Z-style operator waveforms, LFO with AMS/PMS/ALMS.
+// TX81Z-style operator waveforms, LFO with AMS/PMS/ALMS,
+// one-shot and unipolar.
 
 Engine_DX100 : CroneEngine {
 	classvar <maxVoices = 8;
@@ -29,7 +30,8 @@ Engine_DX100 : CroneEngine {
 			persist = 0, killGate = 1, voiceScale = 1, headroom = 1,
 			algo = 0, feedback = 0, dxFeedback = 0, amp = 0.4, pan = 0, transpose = 0,
 			port = 0, portMode = 0,
-			lfoRate = 4, lfoWave = 0, lfoDelay = 0, pms = 0, ams = 0, alms = 0,
+			lfoRate = 4, lfoWave = 0, lfoDelay = 0, lfoOneshot = 0, lfoUni = 0,
+			pms = 0, ams = 0, alms = 0,
 			pitchEgAmt = 0, pitchEgRate = 0.5, pitchEgLevel = 0,
 			// per-operator: ratio, detune (cents), fixed hz, fixed mode, wave, level
 			r1 = 1, r2 = 1, r3 = 1, r4 = 1,
@@ -51,7 +53,8 @@ Engine_DX100 : CroneEngine {
 			rateScale = 0;
 
 			var freq, slide, envGate, kill, keyTrack, velAmt;
-			var lfo, lfoEnv, pitchEg, pmod, amod;
+			var lfo, lfoEnv, lfoShot, lfoUniSel, lfoPh, lfoSh, lfoRaw, lfo01;
+			var pitchEg, pmod, amod;
 			var ratios, dets, fixed, fixedHz, waves, levels;
 			var oscFreq, envs, ops, snd, fb, fbBuf, dxAmt, dxSeed, dxPh;
 			var opWave, mkEnv, rateTime, out1, out2, out3, out4;
@@ -81,20 +84,40 @@ Engine_DX100 : CroneEngine {
 			freq = freq * (2 ** (pitchEg * Lag.kr(pitchEgAmt, 0.05) * 2));
 
 			// ---- LFO ----
+			// looping: free-running phasor (same as the old LFTri/SinOsc).
+			// one-shot: reset on voice start / t_trig, one cycle, hold end.
+			// unipolar: 0..1. bipolar: -1..1 (the original).
+			// waves 0..5: tri, sin, sqr, s&h, up, down.
 			lfoRate = Lag.kr(lfoRate, 0.05).clip(0.02, 60);
 			lfoEnv = EnvGen.kr(Env([0, 1], [1], \lin), envGate,
 				timeScale: Lag.kr(lfoDelay, 0.05).linlin(0, 1, 0.001, 4));
-			lfo = Select.kr(lfoWave.round.clip(0, 3), [
-				LFTri.kr(lfoRate),
-				SinOsc.kr(lfoRate),
-				LFPulse.kr(lfoRate, 0, 0.5).linlin(0, 1, -1, 1),
-				Latch.kr(WhiteNoise.kr, Impulse.kr(lfoRate))
-			]) * lfoEnv;
+			lfoShot = lfoOneshot.round.clip(0, 1);
+			lfoUniSel = lfoUni.round.clip(0, 1);
+			lfoPh = Select.kr(lfoShot, [
+				Phasor.kr(0, lfoRate * ControlDur.ir, 0, 1),
+				Sweep.kr(Impulse.kr(0) + t_trig, lfoRate).clip(0, 1)
+			]);
+			lfoSh = Select.kr(lfoShot, [
+				Latch.kr(WhiteNoise.kr, Impulse.kr(lfoRate) + Impulse.kr(0)),
+				Latch.kr(WhiteNoise.kr, Impulse.kr(0) + t_trig)
+			]);
+			lfoRaw = Select.kr(lfoWave.round.clip(0, 5), [
+				((lfoPh < 0.25) * (lfoPh * 4))
+					+ ((lfoPh >= 0.25) * (lfoPh < 0.75) * (2 - lfoPh * 4))
+					+ ((lfoPh >= 0.75) * (lfoPh * 4 - 4)),
+				(lfoPh * 2pi).sin,
+				(lfoPh < 0.5) * 2 - 1,
+				lfoSh,
+				lfoPh * 2 - 1,
+				1 - lfoPh * 2
+			]);
+			lfo = Select.kr(lfoUniSel, [lfoRaw, lfoRaw * 0.5 + 0.5]) * lfoEnv;
 
-			// pitch mod sensitivity (PMS) -> ~ +/- 1 semitone at full
+			// pitch mod sensitivity (PMS) -> ~ +/- 1 semitone at full (bipolar)
 			pmod = 2 ** (lfo * Lag.kr(pms, 0.05) * 0.0833);
-			// amp mod sensitivity (AMS) -> applied to modulators & carriers
-			amod = 1 - (lfo.range(0, 1) * Lag.kr(ams, 0.05));
+			// amp mod sensitivity (AMS) -> 0..1 depth. unipolar LFO is already 0..1
+			lfo01 = Select.kr(lfoUniSel, [lfo * 0.5 + 0.5, lfo]);
+			amod = 1 - (lfo01.clip(0, 1) * Lag.kr(ams, 0.05));
 
 			freq = freq * pmod;
 
@@ -412,7 +435,8 @@ Engine_DX100 : CroneEngine {
 		[
 			\algo, \feedback, \dxFeedback, \amp, \pan, \transpose,
 			\port, \portMode,
-			\lfoRate, \lfoWave, \lfoDelay, \pms, \ams, \alms,
+			\lfoRate, \lfoWave, \lfoDelay, \lfoOneshot, \lfoUni,
+			\pms, \ams, \alms,
 			\pitchEgAmt, \pitchEgRate, \pitchEgLevel,
 			\r1, \r2, \r3, \r4,
 			\d1, \d2, \d3, \d4,
@@ -446,6 +470,8 @@ Engine_DX100 : CroneEngine {
 		ctlBus[\lfoRate].setSynchronous(4);
 		ctlBus[\lfoWave].setSynchronous(0);
 		ctlBus[\lfoDelay].setSynchronous(0);
+		ctlBus[\lfoOneshot].setSynchronous(0);
+		ctlBus[\lfoUni].setSynchronous(0);
 		ctlBus[\pms].setSynchronous(0);
 		ctlBus[\ams].setSynchronous(0);
 		ctlBus[\alms].setSynchronous(0);

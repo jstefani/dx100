@@ -20,7 +20,7 @@ local a = arc.connect()
 local ALGOS = 16
 local OPS = 4
 local WAVES = { "sin", "half", "abs", "quart", "alt", "alt/2", "sq-sin", "saw" }
-local LFO_WAVES = { "tri", "sin", "sqr", "s&h" }
+local LFO_WAVES = { "tri", "sin", "sqr", "s&h", "up", "down" }
 local RATIOS = {
   0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5,
   6, 6.5, 7, 7.5, 8, 9, 10, 11, 12, 13, 14, 15, 16
@@ -98,6 +98,7 @@ local ready = false
 local FPS = 15
 local lfo_sh_tick = -1
 local lfo_sh_val = 0
+local lfo_shot_t = nil
 
 local function shifted()
   return _menu.alt == true
@@ -168,8 +169,10 @@ local function start_chord(root, vel, legato)
   local ids = {}
   local poly_ids = is_poly() or chord_active()
   if not poly_ids then
+    local trig = 1
+    if legato then trig = 0 end
     engine.note_on(0, MusicUtil.note_num_to_freq(notes[1]), vel,
-      legato and 1 or 0, legato and 0 or 1)
+      legato and 1 or 0, trig)
     ids[1] = 0
   else
     if (not is_poly()) and chord_active() then
@@ -182,6 +185,10 @@ local function start_chord(root, vel, legato)
       engine.note_on(id, MusicUtil.note_num_to_freq(n), vel, 0, 1)
       ids[slot] = id
     end
+  end
+  if poly_ids or not legato then
+    lfo_shot_t = util.time()
+    lfo_sh_val = math.random() * 2 - 1
   end
   sounding[root] = ids
   last_note = root
@@ -306,29 +313,50 @@ end
 
 -- ---------- drawing ----------
 
--- engine LFO, for display. same waves as Engine_DX100 (tri/sin/sqr/s&h).
+-- engine LFO, for display. same waves/polarity/one-shot as Engine_DX100.
 -- delay is per-voice on note-on; the graph always shows the running LFO.
 local function lfo_value()
   local hz = util.linexp(0, 99, 0.05, 40, params:get("lfo_rate"))
-  local p = (util.time() * hz) % 1
+  local oneshot = params:get("lfo_oneshot") == 2
+  local uni = params:get("lfo_uni") == 2
+  local t = util.time()
+  local p
+  if oneshot then
+    if lfo_shot_t == nil then
+      p = 0
+    else
+      p = util.clamp((t - lfo_shot_t) * hz, 0, 1)
+    end
+  else
+    p = (t * hz) % 1
+  end
   local wave = params:get("lfo_wave")
+  local raw
   if wave == 1 then
-    if p < 0.25 then return p * 4
-    elseif p < 0.75 then return 2 - p * 4
-    else return p * 4 - 4
+    if p < 0.25 then raw = p * 4
+    elseif p < 0.75 then raw = 2 - p * 4
+    else raw = p * 4 - 4
     end
   elseif wave == 2 then
-    return math.sin(p * math.pi * 2)
+    raw = math.sin(p * math.pi * 2)
   elseif wave == 3 then
-    return (p < 0.5) and 1 or -1
-  else
-    local tick = math.floor(util.time() * hz)
-    if tick ~= lfo_sh_tick then
-      lfo_sh_tick = tick
-      lfo_sh_val = math.random() * 2 - 1
+    raw = (p < 0.5) and 1 or -1
+  elseif wave == 4 then
+    if not oneshot then
+      local tick = math.floor(t * hz)
+      if tick ~= lfo_sh_tick then
+        lfo_sh_tick = tick
+        lfo_sh_val = math.random() * 2 - 1
+      end
     end
-    return lfo_sh_val
+    raw = lfo_sh_val
+  elseif wave == 5 then
+    raw = p * 2 - 1
+  else
+    raw = 1 - p * 2
   end
+  if uni then raw = raw * 0.5 + 0.5 end
+  return raw
 end
 
 -- (algo + lfo * alms * 15).round.wrap(0, 16) then 1-indexed, same as the engine
@@ -796,6 +824,16 @@ function init()
   params:set_action("lfo_wave", function(x)
     engine.lfoWave(x - 1)
     flash("LFO", LFO_WAVES[x])
+  end)
+  params:add_option("lfo_uni", "polarity", { "bipolar", "unipolar" }, 1)
+  params:set_action("lfo_uni", function(x)
+    engine.lfoUni(x - 1)
+    flash("LFO", ({ "bipolar", "unipolar" })[x])
+  end)
+  params:add_option("lfo_oneshot", "one-shot", { "off", "on" }, 1)
+  params:set_action("lfo_oneshot", function(x)
+    engine.lfoOneshot(x - 1)
+    flash("LFO", x == 2 and "one-shot" or "loop")
   end)
   params:add_number("lfo_delay", "delay", 0, 99, 0)
   params:set_action("lfo_delay", function(x)
