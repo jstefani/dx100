@@ -96,6 +96,8 @@ local grid_dirty = true
 local gfx
 local ready = false
 local FPS = 15
+local lfo_sh_tick = -1
+local lfo_sh_val = 0
 
 local function shifted()
   return _menu.alt == true
@@ -304,6 +306,41 @@ end
 
 -- ---------- drawing ----------
 
+-- engine LFO, for display. same waves as Engine_DX100 (tri/sin/sqr/s&h).
+-- delay is per-voice on note-on; the graph always shows the running LFO.
+local function lfo_value()
+  local hz = util.linexp(0, 99, 0.05, 40, params:get("lfo_rate"))
+  local p = (util.time() * hz) % 1
+  local wave = params:get("lfo_wave")
+  if wave == 1 then
+    if p < 0.25 then return p * 4
+    elseif p < 0.75 then return 2 - p * 4
+    else return p * 4 - 4
+    end
+  elseif wave == 2 then
+    return math.sin(p * math.pi * 2)
+  elseif wave == 3 then
+    return (p < 0.5) and 1 or -1
+  else
+    local tick = math.floor(util.time() * hz)
+    if tick ~= lfo_sh_tick then
+      lfo_sh_tick = tick
+      lfo_sh_val = math.random() * 2 - 1
+    end
+    return lfo_sh_val
+  end
+end
+
+-- (algo + lfo * alms * 15).round.wrap(0, 16) then 1-indexed, same as the engine
+local function live_algo()
+  local base = params:get("algo")
+  local alms = params:get("alms") / 99
+  if alms <= 0 then return base end
+  local a = math.floor((base - 1) + lfo_value() * alms * 15 + 0.5) % ALGOS
+  if a < 0 then a = a + ALGOS end
+  return a + 1
+end
+
 -- node positions for the algorithm diagram, per op, in a 4-slot stack
 local function algo_layout(algo)
   -- returns { [op] = {col, row} }; row 1 = bottom (carrier), higher = modulator
@@ -329,7 +366,7 @@ local function algo_layout(algo)
 end
 
 local function draw_algo(ox, oy)
-  local algo = params:get("algo")
+  local algo = live_algo()
   local lay = algo_layout(algo)
   local cw, ch = 11, 10
   local function nx(c) return ox + (c - 1) * cw end
@@ -467,7 +504,12 @@ function redraw()
   screen.text("DX100")
   screen.level(5)
   screen.move(35, 7)
-  screen.text("ALG " .. params:get("algo"))
+  local shown = live_algo()
+  if params:get("alms") > 0 and shown ~= params:get("algo") then
+    screen.level(15)
+  end
+  screen.text("ALG " .. shown)
+  screen.level(5)
   screen.move(70, 7)
   local fb_h = params:get("feedback")
   local dx_h = params:get("dx_feedback")
@@ -967,6 +1009,9 @@ function init()
   gfx.event = function()
     if hud and (util.time() - focus_t) > 1.6 then
       hud = nil
+      screen_dirty = true
+    end
+    if ready and params:get("alms") > 0 then
       screen_dirty = true
     end
     if norns.menu.status() == false and screen_dirty then
