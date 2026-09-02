@@ -219,7 +219,8 @@ Engine_DX100 : CroneEngine {
 			// ---- algorithm routing ----
 			// Each algorithm is a distinct patch of who modulates whom.
 			// op4 is always the deepest modulator (and holds feedback).
-			// Yamaha 4-op algorithm set, 1-indexed as ALG 1..8:
+			// 1–8: Yamaha 4-op set, same order as DX100/TX81Z (pset indices).
+			// 9–16: extra wirings. op4 still holds feedback. op1 always a carrier.
 			//  1: 4>3>2>1                     (serial)
 			//  2: (4>2), 3>2>1  ->  4 and 3 both into 2
 			//  3: 4>1, 3>2>1
@@ -228,34 +229,48 @@ Engine_DX100 : CroneEngine {
 			//  6: 4>1, 4>2, 4>3 (three carriers from one mod)
 			//  7: 4>3, then 3+2+1 all carriers
 			//  8: all four parallel carriers
+			//  9: 4>3 | 2>1                   (dual 2-op)
+			// 10: 4>3>2 | 1                   (3-stack + dry)
+			// 11: 4>1, 3>1, 2>1               (triple into 1)
+			// 12: 4>3, 4>2 | 1                (fan 2 + dry)
+			// 13: 4>3>1, 4>2>1                (Y into 1)
+			// 14: 4>3>2>1 and 4>1             (serial + skip)
+			// 15: 4>3>2>1 and 3>1             (mid tap)
+			// 16: 4>3>2, 4>1                  (3-deep split)
 			//
 			// Select the *modulator input* per op, then run opWave once.
-			// Selecting 8 full opWave graphs used to compile ~1000 UGens
+			// Selecting 16 full opWave graphs used to compile ~1000 UGens
 			// per voice (every algorithm, every sample). A releasing tail
 			// costs the same as a held note, so any overlap doubled CPU.
 
-			// algorithm mod (ALMS): LFO walks the 8 algorithms around the
-			// selected one. depth 1 = ±7 steps (full set, wraps). 0 = stay.
-			algSel = (algo + (lfo * Lag.kr(alms, 0.05) * 7)).round.wrap(0, 8);
+			// algorithm mod (ALMS): LFO walks the 16 algorithms around the
+			// selected one. depth 1 = ±15 steps (full set, wraps). 0 = stay.
+			algSel = (algo + (lfo * Lag.kr(alms, 0.05) * 15)).round.wrap(0, 16);
 
-			// op3: modulated by op4 in algs 1, 4, 5, 6, 7
+			// op3 modulator input per alg
 			out3 = opWave.(Select.ar(algSel, [
 				out4 * m, DC.ar(0), DC.ar(0), out4 * m,
-				out4 * m, out4 * m, out4 * m, DC.ar(0)
+				out4 * m, out4 * m, out4 * m, DC.ar(0),
+				out4 * m, out4 * m, DC.ar(0), out4 * m,
+				out4 * m, out4 * m, out4 * m, out4 * m
 			]), waves[2], oscFreq[2])
 				* envs[2] * Lag.kr(levels[2], 0.03) * amod;
 
 			// op2
 			out2 = opWave.(Select.ar(algSel, [
 				out3 * m, (out3 + out4) * m, out3 * m, DC.ar(0),
-				out4 * m, out4 * m, DC.ar(0), DC.ar(0)
+				out4 * m, out4 * m, DC.ar(0), DC.ar(0),
+				DC.ar(0), out3 * m, DC.ar(0), out4 * m,
+				out4 * m, out3 * m, out3 * m, out3 * m
 			]), waves[1], oscFreq[1])
 				* envs[1] * Lag.kr(levels[1], 0.03) * amod;
 
 			// op1 (always a carrier)
 			out1 = opWave.(Select.ar(algSel, [
 				out2 * m, out2 * m, (out2 + out4) * m, (out3 + out2) * m,
-				out3 * m, out4 * m, DC.ar(0), DC.ar(0)
+				out3 * m, out4 * m, DC.ar(0), DC.ar(0),
+				out2 * m, DC.ar(0), (out4 + out3 + out2) * m, DC.ar(0),
+				(out3 + out2) * m, (out2 + out4) * m, (out2 + out3) * m, out4 * m
 			]), waves[0], oscFreq[0])
 				* envs[0] * Lag.kr(levels[0], 0.03) * amod;
 
@@ -268,10 +283,18 @@ Engine_DX100 : CroneEngine {
 				out1 + out2,                 // 5
 				out1 + out2 + out3,          // 6
 				out1 + out2 + out3,          // 7
-				out1 + out2 + out3 + out4    // 8
+				out1 + out2 + out3 + out4,   // 8
+				out1 + out3,                 // 9
+				out1 + out2,                 // 10
+				out1,                        // 11
+				out1 + out2 + out3,          // 12
+				out1,                        // 13
+				out1,                        // 14
+				out1,                        // 15
+				out1 + out2                  // 16
 			]);
 			nCarriers = Select.kr(algSel,
-				[1, 1, 1, 1, 2, 3, 3, 4]);
+				[1, 1, 1, 1, 2, 3, 3, 4, 2, 2, 1, 3, 1, 1, 1, 2]);
 			snd = carrierSum / nCarriers.sqrt;
 
 			// ---- output stage ----

@@ -17,7 +17,7 @@ local presets = include("dx100/lib/presets")
 local g = grid.connect()
 local a = arc.connect()
 
-local ALGOS = 8
+local ALGOS = 16
 local OPS = 4
 local WAVES = { "sin", "half", "abs", "quart", "alt", "alt/2", "sq-sin", "saw" }
 local LFO_WAVES = { "tri", "sin", "sqr", "s&h" }
@@ -27,8 +27,11 @@ local RATIOS = {
 }
 
 -- carriers per algorithm (which ops reach the output)
+-- 1–8 Yamaha DX100/TX81Z order (do not reorder: psets store these indices)
+-- 9–16 extra wirings
 local CARRIERS = {
-  { 1 }, { 1 }, { 1 }, { 1 }, { 1, 2 }, { 1, 2, 3 }, { 1, 2, 3 }, { 1, 2, 3, 4 }
+  { 1 }, { 1 }, { 1 }, { 1 }, { 1, 2 }, { 1, 2, 3 }, { 1, 2, 3 }, { 1, 2, 3, 4 },
+  { 1, 3 }, { 1, 2 }, { 1 }, { 1, 2, 3 }, { 1 }, { 1 }, { 1 }, { 1, 2 }
 }
 -- modulation edges per algorithm: { from, to }
 local EDGES = {
@@ -40,6 +43,14 @@ local EDGES = {
   { { 4, 1 }, { 4, 2 }, { 4, 3 } },
   { { 4, 3 } },
   {},
+  { { 4, 3 }, { 2, 1 } },                       -- 9  dual 2-op
+  { { 4, 3 }, { 3, 2 } },                       -- 10 3-stack + dry
+  { { 4, 1 }, { 3, 1 }, { 2, 1 } },             -- 11 triple into 1
+  { { 4, 3 }, { 4, 2 } },                       -- 12 fan 2 + dry
+  { { 4, 3 }, { 4, 2 }, { 3, 1 }, { 2, 1 } },   -- 13 Y into 1
+  { { 4, 3 }, { 3, 2 }, { 2, 1 }, { 4, 1 } },   -- 14 serial + skip
+  { { 4, 3 }, { 3, 2 }, { 2, 1 }, { 3, 1 } },   -- 15 mid tap
+  { { 4, 3 }, { 3, 2 }, { 4, 1 } },             -- 16 3-deep split
 }
 
 local stack = {}
@@ -305,6 +316,14 @@ local function algo_layout(algo)
     { [1] = { 1, 1 }, [2] = { 2, 1 }, [3] = { 3, 1 }, [4] = { 2, 2 } },
     { [1] = { 1, 1 }, [2] = { 2, 1 }, [3] = { 3, 1 }, [4] = { 3, 2 } },
     { [1] = { 1, 1 }, [2] = { 2, 1 }, [3] = { 3, 1 }, [4] = { 4, 1 } },
+    { [1] = { 2, 1 }, [2] = { 2, 2 }, [3] = { 1, 1 }, [4] = { 1, 2 } }, -- 9
+    { [1] = { 2, 1 }, [2] = { 1, 1 }, [3] = { 1, 2 }, [4] = { 1, 3 } }, -- 10
+    { [1] = { 2, 1 }, [2] = { 3, 2 }, [3] = { 2, 2 }, [4] = { 1, 2 } }, -- 11
+    { [1] = { 3, 1 }, [2] = { 2, 1 }, [3] = { 1, 1 }, [4] = { 2, 2 } }, -- 12
+    { [1] = { 2, 1 }, [2] = { 3, 2 }, [3] = { 1, 2 }, [4] = { 2, 3 } }, -- 13
+    { [1] = { 1, 1 }, [2] = { 1, 2 }, [3] = { 1, 3 }, [4] = { 1, 4 } }, -- 14
+    { [1] = { 1, 1 }, [2] = { 1, 2 }, [3] = { 1, 3 }, [4] = { 1, 4 } }, -- 15
+    { [1] = { 2, 1 }, [2] = { 1, 1 }, [3] = { 1, 2 }, [4] = { 1, 3 } }, -- 16
   }
   return L[algo]
 end
@@ -324,7 +343,14 @@ local function draw_algo(ox, oy)
     local x2, y2 = nx(to[1]) + 4, ny(to[2])
     screen.move(x1, y1)
     if from[1] == to[1] then
-      screen.line(x2, y2)
+      if math.abs(from[2] - to[2]) == 1 then
+        screen.line(x2, y2)
+      else
+        -- skip: jog right so the line does not run through in-between ops
+        screen.line(x1 + 8, y1)
+        screen.line(x1 + 8, y2)
+        screen.line(x2, y2)
+      end
     else
       screen.line(x1, y1 + 2)
       screen.line(x2, y1 + 2)
