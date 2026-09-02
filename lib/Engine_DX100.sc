@@ -13,6 +13,7 @@ Engine_DX100 : CroneEngine {
 	var <fxChar, <fxChorus, <fxPhaser, <fxOut;
 	var <voices;
 	var <voiceOrder;
+	var <active;
 	var <ctlBus;
 	var <poly;
 	var <scaleExp;
@@ -58,7 +59,7 @@ Engine_DX100 : CroneEngine {
 			var ratios, dets, fixed, fixedHz, waves, levels;
 			var oscFreq, envs, ops, snd, fb, fbBuf, dxAmt, dxSeed, dxPh;
 			var opWave, mkEnv, rateTime, out1, out2, out3, out4;
-			var m, carrierSum, nCarriers, algSel;
+			var m, carrierSum, nCarriers, algSel, zero;
 
 			// ---- pitch ----
 			hz = Lag.kr(hz, 0.001) * (2 ** (transpose / 12));
@@ -193,26 +194,23 @@ Engine_DX100 : CroneEngine {
 			// phase in, sample out. w: 0 sine, 1 half-sine, 2 abs-sine,
 			// 3 quarter-sine, 4 alt-sine, 5 alt half, 6 sine^2ish, 7 saw-ish
 			opWave = { arg ph, w, fq;
-				var s, half, absS, quart, alt, altHalf, squared, sawish;
-				// SinOsc's phase input degrades past about +/-8pi (~25 rad):
-				// measured max error vs a wrapped phase is ~1e-7 below that
-				// and jumps to ~2.0 above it. This engine's worst case is
-				// m(7.0) * two modulators at full level = 14 rad, so the
-				// bound is not currently reached -- this wrap is cheap
-				// insurance if m or operator levels are ever raised, not a
-				// fix for an audible defect.
+				var s, s2, s3, pulse;
+				// SinOsc's phase input degrades past about +/-8pi (~25 rad).
+				// wrap is cheap insurance if m or operator levels are raised.
 				ph = ph.wrap(-pi, pi);
 				s = SinOsc.ar(fq, ph);
-				half = s.max(0);
-				absS = s.abs;
-				quart = SinOsc.ar(fq, ph).max(0) * LFPulse.ar(fq, 0, 0.5);
-				alt = SinOsc.ar(fq * 2, ph) * LFPulse.ar(fq, 0, 0.5);
-				altHalf = alt.max(0);
-				squared = s * s * s.sign;
-				sawish = (s + (SinOsc.ar(fq * 2, ph) * 0.5)
-					+ (SinOsc.ar(fq * 3, ph) * 0.333)) * 0.6;
+				s2 = SinOsc.ar(fq * 2, ph);
+				s3 = SinOsc.ar(fq * 3, ph);
+				pulse = LFPulse.ar(fq, 0, 0.5);
 				Select.ar(w.round.clip(0, 7), [
-					s, half, absS, quart, alt, altHalf, squared, sawish
+					s,
+					s.max(0),
+					s.abs,
+					s.max(0) * pulse,
+					s2 * pulse,
+					(s2 * pulse).max(0),
+					s.abs * s,
+					(s + (s2 * 0.5) + (s3 * 0.333)) * 0.6
 				]);
 			};
 
@@ -270,20 +268,22 @@ Engine_DX100 : CroneEngine {
 			// selected one. depth 1 = ±15 steps (full set, wraps). 0 = stay.
 			algSel = (algo + (lfo * Lag.kr(alms, 0.05) * 15)).round.wrap(0, 16);
 
-			// op3 modulator input per alg
+			// one silent for every unused mod slot — a DC.ar(0) per
+			// slot used to add a UGen each.
+			zero = DC.ar(0);
 			out3 = opWave.(Select.ar(algSel, [
-				out4 * m, DC.ar(0), DC.ar(0), out4 * m,
-				out4 * m, out4 * m, out4 * m, DC.ar(0),
-				out4 * m, out4 * m, DC.ar(0), out4 * m,
+				out4 * m, zero, zero, out4 * m,
+				out4 * m, out4 * m, out4 * m, zero,
+				out4 * m, out4 * m, zero, out4 * m,
 				out4 * m, out4 * m, out4 * m, out4 * m
 			]), waves[2], oscFreq[2])
 				* envs[2] * Lag.kr(levels[2], 0.03) * amod;
 
 			// op2
 			out2 = opWave.(Select.ar(algSel, [
-				out3 * m, (out3 + out4) * m, out3 * m, DC.ar(0),
-				out4 * m, out4 * m, DC.ar(0), DC.ar(0),
-				DC.ar(0), out3 * m, DC.ar(0), out4 * m,
+				out3 * m, (out3 + out4) * m, out3 * m, zero,
+				out4 * m, out4 * m, zero, zero,
+				zero, out3 * m, zero, out4 * m,
 				out4 * m, out3 * m, out3 * m, out3 * m
 			]), waves[1], oscFreq[1])
 				* envs[1] * Lag.kr(levels[1], 0.03) * amod;
@@ -291,8 +291,8 @@ Engine_DX100 : CroneEngine {
 			// op1 (always a carrier)
 			out1 = opWave.(Select.ar(algSel, [
 				out2 * m, out2 * m, (out2 + out4) * m, (out3 + out2) * m,
-				out3 * m, out4 * m, DC.ar(0), DC.ar(0),
-				out2 * m, DC.ar(0), (out4 + out3 + out2) * m, DC.ar(0),
+				out3 * m, out4 * m, zero, zero,
+				out2 * m, zero, (out4 + out3 + out2) * m, zero,
 				(out3 + out2) * m, (out2 + out4) * m, (out2 + out3) * m, out4 * m
 			]), waves[0], oscFreq[0])
 				* envs[0] * Lag.kr(levels[0], 0.03) * amod;
@@ -522,6 +522,7 @@ Engine_DX100 : CroneEngine {
 		fxPhaser.run(false);
 		voices = Dictionary.new;
 		voiceOrder = List.new;
+		active = List.new;
 		poly = 1;
 		scaleExp = 0.5;
 		headroom = 1.0;
@@ -575,10 +576,8 @@ Engine_DX100 : CroneEngine {
 
 		this.addCommand("headroom", "f", { arg msg;
 			headroom = msg[1].clip(0, 2);
-			voices.do({ arg syn;
-				if(syn.notNil and: { syn.isPlaying }, {
-					syn.set(\headroom, headroom);
-				});
+			active.do({ arg syn;
+				if(syn.notNil, { syn.set(\headroom, headroom) });
 			});
 		});
 
@@ -611,13 +610,11 @@ Engine_DX100 : CroneEngine {
 	// instead of driving the output bus into clipping.
 	rebalance {
 		var n, scale;
-		n = voices.size.max(1);
+		n = active.size.max(1);
 		// scaleExp 0 = no scaling, 0.5 = 1/sqrt(N), 1.0 = 1/N
 		scale = n.pow(scaleExp.neg);
-		voices.do({ arg syn;
-			if(syn.notNil and: { syn.isPlaying }, {
-				syn.set(\voiceScale, scale);
-			});
+		active.do({ arg syn;
+			if(syn.notNil, { syn.set(\voiceScale, scale) });
 		});
 		^scale;
 	}
@@ -626,72 +623,75 @@ Engine_DX100 : CroneEngine {
 		var syn, args, persist;
 		if(poly == 0, { id = 0 });
 		syn = voices[id];
-		if(syn.notNil and: { syn.isPlaying }, {
+		// Reuse whenever this id has a language-side node. Do not test
+		// isPlaying: NodeWatcher is false until /n_go, so a retrigger in
+		// that window used to spawn a second synth. The old one kept
+		// gate=1, dropped out of `voices`, and never freed — CPU compounded.
+		if(syn.notNil, {
 			syn.set(
 				\hz, hz, \vel, vel, \legato, legato,
 				\gate, 1, \t_trig, trig, \killGate, 1
 			);
 			voiceOrder.remove(id);
 			voiceOrder.add(id);
-		}, {
-			if(voices.size >= Engine_DX100.maxVoices, { this.steal });
-			persist = (poly == 0).if({ 1 }, { 0 });
-			args = [
-				\out, fxBus.index,
-				\hz, hz, \vel, vel, \legato, legato,
-				\gate, 1, \t_trig, trig, \persist, persist, \killGate, 1
-			];
-			ctlBus.keysValuesDo({ arg name, bus;
-				args = args.add(name).add(bus.getSynchronous);
-			});
-			args = args.add(\voiceScale).add(
-				(voices.size + 1).max(1).pow(scaleExp.neg));
-			args = args.add(\headroom).add(headroom);
-			syn = Synth(\dx100, args, gr);
-			ctlBus.keys.do({ arg name;
-				syn.map(name, ctlBus[name]);
-			});
-			NodeWatcher.register(syn);
-			syn.onFree({
+			active.remove(syn);
+			active.add(syn);
+			^this;
+		});
+		while({ active.size >= Engine_DX100.maxVoices }, { this.steal });
+		persist = (poly == 0).if({ 1 }, { 0 });
+		args = [
+			\out, fxBus.index,
+			\hz, hz, \vel, vel, \legato, legato,
+			\gate, 1, \t_trig, trig, \persist, persist, \killGate, 1
+		];
+		ctlBus.keysValuesDo({ arg name, bus;
+			args = args.add(name).add(bus.getSynchronous);
+		});
+		args = args.add(\voiceScale).add(
+			(active.size + 1).max(1).pow(scaleExp.neg));
+		args = args.add(\headroom).add(headroom);
+		syn = Synth(\dx100, args, gr);
+		ctlBus.keys.do({ arg name;
+			syn.map(name, ctlBus[name]);
+		});
+		NodeWatcher.register(syn);
+		syn.onFree({
+			active.remove(syn);
+			if(voices[id] === syn, {
 				voices.removeAt(id);
 				voiceOrder.remove(id);
-				// a freed voice leaves more headroom for the rest
-				this.rebalance;
 			});
-			voices.put(id, syn);
-			voiceOrder.add(id);
 			this.rebalance;
 		});
+		voices.put(id, syn);
+		voiceOrder.add(id);
+		active.add(syn);
+		this.rebalance;
 	}
 
 	noteOff { arg id;
 		var syn;
 		if(poly == 0, { id = 0 });
 		syn = voices[id];
-		if(syn.notNil and: { syn.isPlaying }, {
-			syn.set(\gate, 0);
-		});
+		if(syn.notNil, { syn.set(\gate, 0) });
 	}
 
 	noteOffAll {
-		voices.keysValuesDo({ arg id, syn;
-			if(syn.notNil and: { syn.isPlaying }, {
-				syn.set(\gate, 0);
-			});
-		});
+		// Group set reaches orphans that fell out of `voices`.
+		gr.set(\gate, 0, \killGate, 0);
 	}
 
 	steal {
-		var id, syn;
-		if(voiceOrder.size == 0, { ^this });
-		id = voiceOrder.removeAt(0);
-		syn = voices[id];
-		if(syn.notNil and: { syn.isPlaying }, {
-			syn.set(\killGate, 0);
-		}, {
-			if(syn.notNil, { syn.free });
+		var syn, id;
+		if(active.size == 0, { ^this });
+		syn = active.removeAt(0);
+		id = voices.findKeyForValue(syn);
+		if(id.notNil, {
+			voices.removeAt(id);
+			voiceOrder.remove(id);
 		});
-		voices.removeAt(id);
+		if(syn.notNil, { syn.set(\killGate, 0) });
 	}
 
 	// Pause after mix lag (80–100ms) so the wet fade finishes first.
