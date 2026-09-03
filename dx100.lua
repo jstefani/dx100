@@ -115,6 +115,21 @@ local function op_id(base, n)
   return base .. "_" .. n
 end
 
+-- defaults for LFO + chorus/phaser. psets written before these params
+-- existed omit them, so a load would keep the previous patch's values.
+local LFO_FX = {
+  lfo_rate = 30, lfo_wave = 1, lfo_uni = 1, lfo_oneshot = 1, lfo_delay = 0,
+  pms = 0, ams = 0, alms = 0,
+  chorus = 0, chorus_rate = 40, chorus_width = 50,
+  phaser = 0, phaser_rate = 25, phaser_width = 50,
+}
+
+local function reset_lfo_fx(silent)
+  for id, v in pairs(LFO_FX) do
+    params:set(id, v, silent)
+  end
+end
+
 local function is_poly()
   return params:get("voice_mode") == 2
 end
@@ -250,6 +265,7 @@ end
 local function load_preset(idx)
   local p = presets[idx]
   if p == nil then return end
+  reset_lfo_fx()
   params:set("algo", p.algo)
   params:set("feedback", math.floor(p.fb * 99 + 0.5))
   params:set("dx_feedback", 0)
@@ -281,6 +297,7 @@ local function load_preset(idx)
 end
 
 local function rnd_voice()
+  reset_lfo_fx()
   local algo = math.random(1, ALGOS)
   params:set("algo", algo)
   params:set("feedback", math.random(0, 85))
@@ -1030,7 +1047,25 @@ function init()
   params:add_separator("midi")
   params:add_number("midi_ch", "midi channel", 0, 16, 0)
 
-  params.action_read = function()
+  params.action_read = function(filename, silent)
+    -- keys missing from older psets keep whatever the last patch had.
+    -- fill those with defaults so a load is a complete voice.
+    local present = {}
+    if filename then
+      local fd = io.open(filename, "r")
+      if fd then
+        for line in fd:lines() do
+          local id = line:match('^"([^"]+)"')
+          if id then present[id] = true end
+        end
+        fd:close()
+      end
+    end
+    for id, v in pairs(LFO_FX) do
+      if not present[id] then
+        params:set(id, v, silent)
+      end
+    end
     engine.voice_mode(params:get("voice_mode") - 1)
   end
   params:read()
