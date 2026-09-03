@@ -250,7 +250,8 @@ static void DX100Voice_Ctor(DX100Voice* unit) {
 	unit->rng = 1u;
 	unit->oneshotDone = 0;
 	SETCALC(DX100Voice_next);
-	DX100Voice_next(unit, 1);
+	// Do not calc in Ctor: IN0 can be garbage before wires connect,
+	// which left envelopes idle and every operator silent.
 }
 
 static void DX100Voice_next(DX100Voice* unit, int inNumSamples) {
@@ -314,9 +315,7 @@ static void DX100Voice_next(DX100Voice* unit, int inNumSamples) {
 	}
 
 	int gateOn = gate >= 0.5f;
-	int gateEdge = gateOn && unit->prevGate < 0.5f;
 	int trigEdge = ttrig > 0.f && unit->prevTrig <= 0.f;
-	unit->prevGate = gate;
 	unit->prevTrig = ttrig;
 
 	float slide = (portMode >= 0.5f) ? port : port * legato;
@@ -326,7 +325,7 @@ static void DX100Voice_next(DX100Voice* unit, int inNumSamples) {
 	float delayTime = linlin(lfoDelay, 0.f, 1.f, 0.001f, 4.f);
 	float pegDur = linexp(pegRate, 0.f, 1.f, 4.f, 0.004f);
 
-	if (gateEdge) {
+	if (gateOn && unit->prevGate < 0.5f) {
 		unit->lfoDelayPos = 0.f;
 		unit->pegPos = 0.f;
 		if (lfoOneshot) {
@@ -344,6 +343,9 @@ static void DX100Voice_next(DX100Voice* unit, int inNumSamples) {
 	}
 
 	for (int n = 0; n < inNumSamples; ++n) {
+		int gateEdge = gateOn && unit->prevGate < 0.5f;
+		unit->prevGate = gateOn ? 1.f : 0.f;
+
 		float targetHz = hzIn * powf(2.f, transpose / 12.f);
 		if (targetHz < 8.f) targetHz = 8.f;
 		if (targetHz > 12000.f) targetHz = 12000.f;
@@ -368,7 +370,8 @@ static void DX100Voice_next(DX100Voice* unit, int inNumSamples) {
 		// envelopes
 		for (int i = 0; i < 4; ++i) {
 			OpEnv* e = &unit->env[i];
-			if (gateEdge) {
+			// gate held but still idle: missed the edge (Ctor IN0 garbage).
+			if (gateOn && (gateEdge || e->stage == kIdle)) {
 				e->stage = kAtk;
 				envStartSeg(e, 0.f, 1.f, rateTime(atkR[i], 0.0008f, 6.f) * scl, 0.f);
 			} else if (!gateOn && e->stage != kIdle && e->stage != kRel) {
