@@ -3,3 +3,6 @@
 # not start -- and a stubbed CroneEngine breaks every engine, not just
 # this one. Nothing under test/ may ever be a .sc file.
 test/**/*.sc
+lib/ugens/build/
+*.so
+*.scx
