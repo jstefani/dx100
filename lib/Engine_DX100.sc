@@ -14,8 +14,10 @@ Engine_DX100 : CroneEngine {
 	var <voices;
 	var <voiceOrder;
 	var <active;
+	var <held;
 	var <ctlBus;
 	var <poly;
+	var <voiceCap;
 	var <scaleExp;
 	var <headroom;
 	var fxAlive;
@@ -523,7 +525,9 @@ Engine_DX100 : CroneEngine {
 		voices = Dictionary.new;
 		voiceOrder = List.new;
 		active = List.new;
+		held = IdentitySet.new;
 		poly = 1;
+		voiceCap = Engine_DX100.maxVoices;
 		scaleExp = 0.5;
 		headroom = 1.0;
 
@@ -586,6 +590,12 @@ Engine_DX100 : CroneEngine {
 			this.noteOffAll;
 		});
 
+		this.addCommand("max_voices", "f", { arg msg;
+			voiceCap = msg[1].asInteger.clip(1, Engine_DX100.maxVoices);
+			while({ active.size > voiceCap }, { this.steal });
+			this.rebalance;
+		});
+
 		this.addCommand("note_on", "iffff", { arg msg;
 			this.noteOn(msg[1].asInteger, msg[2], msg[3], msg[4], msg[5]);
 		});
@@ -636,9 +646,10 @@ Engine_DX100 : CroneEngine {
 			voiceOrder.add(id);
 			active.remove(syn);
 			active.add(syn);
+			held.add(syn);
 			^this;
 		});
-		while({ active.size >= Engine_DX100.maxVoices }, { this.steal });
+		while({ active.size >= voiceCap }, { this.steal });
 		persist = (poly == 0).if({ 1 }, { 0 });
 		args = [
 			\out, fxBus.index,
@@ -658,6 +669,7 @@ Engine_DX100 : CroneEngine {
 		NodeWatcher.register(syn);
 		syn.onFree({
 			active.remove(syn);
+			held.remove(syn);
 			if(voices[id] === syn, {
 				voices.removeAt(id);
 				voiceOrder.remove(id);
@@ -667,6 +679,7 @@ Engine_DX100 : CroneEngine {
 		voices.put(id, syn);
 		voiceOrder.add(id);
 		active.add(syn);
+		held.add(syn);
 		this.rebalance;
 	}
 
@@ -674,18 +687,27 @@ Engine_DX100 : CroneEngine {
 		var syn;
 		if(poly == 0, { id = 0 });
 		syn = voices[id];
-		if(syn.notNil, { syn.set(\gate, 0) });
+		if(syn.notNil, {
+			held.remove(syn);
+			syn.set(\gate, 0);
+		});
 	}
 
 	noteOffAll {
 		// Group set reaches orphans that fell out of `voices`.
 		gr.set(\gate, 0, \killGate, 0);
+		held.clear;
 	}
 
+	// Prefer oldest releasing tail. Only steal a held note if every
+	// live synth is still gated.
 	steal {
 		var syn, id;
 		if(active.size == 0, { ^this });
-		syn = active.removeAt(0);
+		syn = active.detect({ arg s; held.includes(s).not });
+		if(syn.isNil, { syn = active.first });
+		active.remove(syn);
+		held.remove(syn);
 		id = voices.findKeyForValue(syn);
 		if(id.notNil, {
 			voices.removeAt(id);
