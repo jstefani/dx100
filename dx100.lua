@@ -14,6 +14,8 @@ engine.name = "DX100"
 local MusicUtil = require "musicutil"
 local presets = include("dx100/lib/presets")
 local splash = include("dx100/lib/splash")
+local sysex = include("dx100/lib/sysex")
+local FACTORY_COUNT = #presets
 
 local g = grid.connect()
 local a = arc.connect()
@@ -120,6 +122,7 @@ local FPS = 15
 local lfo_sh_tick = -1
 local lfo_sh_val = 0
 local lfo_shot_t = nil
+local sysex_buf = nil -- bytes of a sysex message still arriving over midi
 
 local function shifted()
   return _menu.alt == true
@@ -319,8 +322,7 @@ end
 
 -- ---------- voice load / randomise ----------
 
-local function load_preset(idx)
-  local p = presets[idx]
+local function apply_voice(p)
   if p == nil then return end
   reset_lfo_fx()
   params:set("algo", p.algo)
@@ -351,7 +353,67 @@ local function load_preset(idx)
       params:set(op_id("fixed", i), 1)
     end
   end
+  -- imported voices carry their LFO / pitch EG / performance settings
+  if p.extra then
+    for id, v in pairs(p.extra) do
+      if params.lookup[id] then params:set(id, v) end
+    end
+  end
   flash("VOICE", p.name)
+end
+
+local function load_preset(idx)
+  apply_voice(presets[idx])
+end
+
+-- ---------- sysex import ----------
+
+local function set_preset_range()
+  local pp = params:lookup_param("preset")
+  pp.max = #presets
+  pp.range = pp.max - pp.min
+  if params:get("preset") > #presets then params:set("preset", #presets) end
+end
+
+-- append voices to the preset list, after the factory ones
+local function add_voices(voices, source)
+  if #voices == 0 then return end
+  for _, v in ipairs(voices) do presets[#presets + 1] = v end
+  set_preset_range()
+  flash("SYSEX", #voices .. " voices")
+  print("dx100: imported " .. #voices .. " voices from " .. tostring(source))
+  screen_dirty = true
+end
+
+local function clear_imported()
+  for i = #presets, FACTORY_COUNT + 1, -1 do presets[i] = nil end
+  set_preset_range()
+  flash("SYSEX", "cleared")
+  screen_dirty = true
+end
+
+local function import_syx_file(path)
+  if path == nil or path == "" or path == "-" then return end
+  local voices, warn = sysex.load_file(path, RATIOS)
+  for _, w in ipairs(warn) do print("dx100 sysex: " .. w) end
+  if #voices == 0 then
+    flash("SYSEX", "no voices")
+    return
+  end
+  add_voices(voices, path:match("[^/]*$"))
+end
+
+-- a complete F0..F7 message received over midi
+local function sysex_received(bytes)
+  local voices, warn = sysex.parse(bytes, RATIOS)
+  for _, w in ipairs(warn) do print("dx100 sysex: " .. w) end
+  if #voices == 0 then return end
+  if #voices == 1 and bytes[4] == 0x03 then
+    -- single voice dump: straight into the edit buffer, like the hardware
+    apply_voice(voices[1])
+    voices[1].name = voices[1].name .. " (midi)"
+  end
+  add_voices(voices, "midi")
 end
 
 local function rnd_voice()
@@ -747,6 +809,22 @@ local function arc_redraw()
 end
 
 local function midi_event(data)
+  -- sysex arrives in fragments; gather until EOX, then hand it over.
+  -- these carry no channel, so they bypass the channel filter.
+  if sysex_buf or data[1] == 0xf0 then
+    sysex_buf = sysex_buf or {}
+    for _, b in ipairs(data) do
+      sysex_buf[#sysex_buf + 1] = b
+      if b == 0xf7 then
+        local buf = sysex_buf
+        sysex_buf = nil
+        sysex_received(buf)
+        return
+      end
+    end
+    if #sysex_buf > 8192 then sysex_buf = nil end -- runaway, drop it
+    return
+  end
   local msg = midi.to_msg(data)
   local ch = params:get("midi_ch")
   if ch > 0 and msg.ch ~= ch then return end
@@ -1185,10 +1263,26 @@ function init()
     flash("VSCALE", string.format("%.2f", x))
   end)
 
+  -- defined before "preset" so a pset's imported bank is loaded back
+  -- before its preset index is restored.
+  params:add_separator("sysex")
+  params:add_file("syx_file", "import .syx", "-")
+  params:set_action("syx_file", function(path)
+    clear_imported()
+    import_syx_file(path)
+  end)
+  params:add_trigger("syx_clear", "clear imported")
+  params:set_action("syx_clear", function()
+    params:set("syx_file", "-", true)
+    clear_imported()
+  end)
+
   params:add_separator("presets")
+  -- selecting only points at a voice; K1+E1 or "load voice" applies it,
+  -- so reading a pset does not overwrite its operators with a preset.
   params:add_number("preset", "voice", 1, #presets, 1)
   params:set_action("preset", function(x)
-    if ready then load_preset(x) end
+    if ready and presets[x] then flash("VOICE", presets[x].name) end
   end)
   params:add_trigger("load_preset", "load voice")
   params:set_action("load_preset", function()

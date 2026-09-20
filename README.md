@@ -126,3 +126,34 @@ as-is. `e.piano` is the owner's manual tutorial voice. They are starting
 points, not clones of the ROM patches.
 
 Anything you build saves with the usual PARAMS > PSET menu.
+
+## importing dx100 patches (.syx)
+
+PARAMS > sysex > **import .syx** opens the file browser at `dust/`. Put
+banks somewhere under it, e.g. `dust/data/dx100/syx/`. Both Yamaha 4-op
+dump formats are read:
+
+- **VCED** single voice (93 bytes, format 03): the edit-buffer dump the
+  DX100 sends when you press a voice button.
+- **VMEM** 32-voice bank (4096 bytes, format 04): the SYS INFO bulk dump.
+
+Files may hold several messages, and headerless raw dumps are accepted.
+DX21 and DX27 dumps are the same format. TX81Z banks load as their DX100
+subset (waveforms and fixed frequency are ignored). Empty bank slots are
+skipped.
+
+Imported voices are appended after the eight factory voices in PARAMS >
+presets > **voice** (and K1+E1), under the name stored in the dump. Each
+carries its LFO, pitch EG, portamento, poly/mono, bend range, chorus and
+wheel/breath settings, which are applied when the voice is loaded.
+Levels, rates, ratios, detune, scaling, AME and EBS map one to one onto
+the operator params. **clear imported** drops them again.
+
+The import file is saved in psets, so a pset that points at an imported
+voice gets its bank back on load.
+
+**Live over MIDI:** a DX100 (or DX21/27/TX81Z) plugged into the norns can
+dump straight in. A single-voice dump loads immediately as the current
+voice, like the hardware's edit buffer; a 32-voice bulk dump is appended
+to the list. On the DX100: FUNCTION > SYS INFO twice > "MIDI Transmit?"
+> YES.
