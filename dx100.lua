@@ -538,6 +538,10 @@ local function bar(x, y, w, h, amt, bright)
 end
 
 function redraw()
+  if splash_on then
+    splash.draw()
+    return
+  end
   screen.clear()
   screen.aa(0)
   screen.line_width(1)
@@ -546,10 +550,6 @@ function redraw()
 
   -- header
   screen.level(5)
-  if splash_on then
-    splash.draw()
-    return
-  end
   screen.move(35, 7)
   local shown = live_algo()
   if params:get("alms") > 0 and shown ~= params:get("algo") then
@@ -1091,6 +1091,7 @@ function init()
     if ready and params:get("alms") > 0 then
       screen_dirty = true
     end
+    if splash_on then screen_dirty = true end -- animate the splash
     if norns.menu.status() == false and screen_dirty then
       redraw()
       screen_dirty = false
@@ -1103,11 +1104,26 @@ function init()
   end
   gfx:start()
 
+  splash_clk = clock.run(function()
+    clock.sleep(3)
+    splash_on = false
+    screen_dirty = true
+  end)
+
   grid_dirty = true
   screen_dirty = true
 end
 
+local function dismiss_splash()
+  if not splash_on then return false end
+  splash_on = false
+  if splash_clk then clock.cancel(splash_clk); splash_clk = nil end
+  screen_dirty = true
+  return true
+end
+
 function enc(n, d)
+  if dismiss_splash() then return end
   if shifted() then
     if n == 1 then
       params:delta("preset", d)
@@ -1128,26 +1144,12 @@ function enc(n, d)
   end
   screen_dirty = true
 end
-  splash_clk = clock.run(function()
-    clock.sleep(2.5)
-    splash_on = false
-    screen_dirty = true
-  end)
-
 
 function key(n, z)
   if z ~= 1 then return end
-  if n == 2 then
-local function dismiss_splash()
-  if not splash_on then return false end
-  splash_on = false
-  if splash_clk then clock.cancel(splash_clk); splash_clk = nil end
-  screen_dirty = true
-  return true
-end
-
-    cur_op = (cur_op % OPS) + 1
   if dismiss_splash() then return end
+  if n == 2 then
+    cur_op = (cur_op % OPS) + 1
     flash("OP", cur_op)
   elseif n == 3 then
     if shifted() then
@@ -1171,7 +1173,6 @@ g.key = function(x, y, z)
       grid_held[note] = nil
       note_off(note)
     end
-  if dismiss_splash() then return end
   end
   grid_dirty = true
 end
@@ -1187,6 +1188,6 @@ end
 
 function cleanup()
   if gfx then gfx:stop() end
+  if splash_clk then clock.cancel(splash_clk) end
   engine.note_off_all()
 end
-  if splash_clk then clock.cancel(splash_clk) end

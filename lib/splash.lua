@@ -1,6 +1,6 @@
 -- dx100 splash: italic striped "DX", hollow "100", tagline.
--- the logo is rendered once into horizontal runs at load; draw() just
--- blits them. shapes are sampled per pixel in letter space, sheared for
+-- the logo is rendered once into horizontal runs at load; draw() blits
+-- them with per-frame tape wear: flicker, tears, dropouts, noise. shapes are sampled per pixel in letter space, sheared for
 -- the italic lean, then outlined by a 1px edge test.
 
 local H, SH, GAP = 26, 4, 4 -- logo height, shear px, letter gap
@@ -106,23 +106,75 @@ local function build()
   return runs
 end
 
-local M = { runs = build() }
+local M = { runs = build(), frame = 0 }
 
+local function rnd(a, b) return math.random(a, b) end
+
+-- one frame of worn-tape playback. call every tick while the splash is up.
 function M.draw()
+  M.frame = M.frame + 1
   screen.clear()
   screen.aa(0)
-  screen.level(15)
-  for _, r in ipairs(M.runs) do
-    screen.rect(r[2], r[1], r[3], 1)
+
+  -- brightness: mostly steady, occasional dips like a weak signal
+  local base = 15
+  local r = math.random()
+  if r < 0.06 then base = rnd(5, 9)
+  elseif r < 0.25 then base = rnd(12, 14) end
+
+  -- whole-frame jitter: small, rare
+  local jx = (math.random() < 0.15) and rnd(-1, 1) or 0
+  local jy = (math.random() < 0.05) and rnd(-2, 2) or 0
+
+  -- tear band: a slab of rows dragged sideways
+  local ty, th, tdx = -1, 0, 0
+  if math.random() < 0.4 then
+    ty, th, tdx = rnd(0, 60), rnd(2, 9), rnd(-4, 4)
+  end
+  local function tear(y) return (y >= ty and y < ty + th) and tdx or 0 end
+
+  -- logo
+  for _, run in ipairs(M.runs) do
+    local y = run[1] + jy
+    local x = run[2] + jx + tear(y)
+    local lvl = base
+    if math.random() < 0.05 then lvl = rnd(1, 6) end -- dropout
+    screen.level(lvl)
+    screen.rect(x, y, run[3], 1)
     screen.fill()
   end
+
+  -- tagline: dimmer, same tears, one line sometimes blinks out
   screen.font_face(1)
   screen.font_size(8)
-  screen.level(6)
-  screen.move(64, 46)
-  screen.text_center("DIGITAL PROGRAMMABLE")
-  screen.move(64, 57)
-  screen.text_center("ALGORITHM SYNTHESIZER")
+  local tl = math.max(1, math.floor(base * 0.45))
+  for i, line in ipairs({ { 46, "DIGITAL PROGRAMMABLE" },
+                           { 57, "ALGORITHM SYNTHESIZER" } }) do
+    if math.random() > 0.04 then
+      local y = line[1] + jy
+      screen.level(tl)
+      screen.move(64 + jx + tear(y - 4), y)
+      screen.text_center(line[2])
+    end
+  end
+
+  -- head-switching noise: a band that creeps down the screen and wraps
+  local band = (M.frame * 3) % 90 - 12
+  for _ = 1, 40 do
+    local y = band + rnd(0, 4)
+    if y >= 0 and y <= 63 then
+      screen.level(rnd(1, 8))
+      screen.rect(rnd(0, 127), y, rnd(1, 6), 1)
+      screen.fill()
+    end
+  end
+  -- plus a constant fizz along the bottom edge
+  for _ = 1, 14 do
+    screen.level(rnd(1, 5))
+    screen.rect(rnd(0, 127), rnd(61, 63), rnd(1, 4), 1)
+    screen.fill()
+  end
+
   screen.update()
 end
 
