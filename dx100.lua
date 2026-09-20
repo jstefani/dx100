@@ -13,6 +13,7 @@ engine.name = "DX100"
 
 local MusicUtil = require "musicutil"
 local presets = include("dx100/lib/presets")
+local splash = include("dx100/lib/splash")
 
 local g = grid.connect()
 local a = arc.connect()
@@ -93,6 +94,8 @@ local midi_devs = {}
 local screen_dirty = true
 local grid_dirty = true
 local gfx
+local splash_on = true -- logo on load; any key/enc or the timer clears it
+local splash_clk
 local ready = false
 local FPS = 15
 local lfo_sh_tick = -1
@@ -543,6 +546,10 @@ function redraw()
 
   -- header
   screen.level(5)
+  if splash_on then
+    splash.draw()
+    return
+  end
   screen.move(35, 7)
   local shown = live_algo()
   if params:get("alms") > 0 and shown ~= params:get("algo") then
@@ -1121,11 +1128,26 @@ function enc(n, d)
   end
   screen_dirty = true
 end
+  splash_clk = clock.run(function()
+    clock.sleep(2.5)
+    splash_on = false
+    screen_dirty = true
+  end)
+
 
 function key(n, z)
   if z ~= 1 then return end
   if n == 2 then
+local function dismiss_splash()
+  if not splash_on then return false end
+  splash_on = false
+  if splash_clk then clock.cancel(splash_clk); splash_clk = nil end
+  screen_dirty = true
+  return true
+end
+
     cur_op = (cur_op % OPS) + 1
+  if dismiss_splash() then return end
     flash("OP", cur_op)
   elseif n == 3 then
     if shifted() then
@@ -1149,6 +1171,7 @@ g.key = function(x, y, z)
       grid_held[note] = nil
       note_off(note)
     end
+  if dismiss_splash() then return end
   end
   grid_dirty = true
 end
@@ -1166,3 +1189,4 @@ function cleanup()
   if gfx then gfx:stop() end
   engine.note_off_all()
 end
+  if splash_clk then clock.cancel(splash_clk) end
