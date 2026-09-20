@@ -1274,6 +1274,14 @@ function init()
     clear_imported()
     import_syx_file(path)
   end)
+  -- the menu right-aligns the file name against the label; a long name
+  -- runs into it. show a short stem instead of the full file name.
+  params:lookup_param("syx_file").string = function(self)
+    if self.path == nil or self.path == "-" then return "-" end
+    local stem = self.path:match("[^/]*$"):gsub("%.[^.]*$", "")
+    if #stem > 8 then stem = stem:sub(1, 7) .. "~" end
+    return stem
+  end
   params:add_trigger("syx_clear", "clear imported")
   params:set_action("syx_clear", function()
     params:set("syx_file", "-", true)
