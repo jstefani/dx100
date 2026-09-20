@@ -359,16 +359,20 @@ local function rnd_voice()
   local algo = math.random(1, ALGOS)
   params:set("algo", algo)
   params:set("feedback", math.random(0, 6))
-  params:set("dx_feedback", (math.random() < 0.35) and math.random(0, 80) or 0)
+  params:set("dx_feedback", 0) -- not a hardware control; leave it alone
   for i = 1, OPS do
     local carrier = false
     for _, c in ipairs(CARRIERS[algo]) do
       if c == i then carrier = true end
     end
-    -- carriers stay near simple ratios; modulators roam the whole table
+    -- carriers stay near simple ratios. modulators mostly stay in the
+    -- lower table (<= 8.00): above that they alias hard on high notes,
+    -- and the timbre then changes from key to key.
     if carrier or math.random() < 0.5 then
       params:set(op_id("ratio", i),
         ({ RATIO_1, RATIO_1, RATIO_1, 9, 1, 14 })[math.random(1, 6)])
+    elseif math.random() < 0.75 then
+      params:set(op_id("ratio", i), math.random(1, 26))
     else
       params:set(op_id("ratio", i), math.random(1, #RATIOS))
     end
@@ -382,11 +386,15 @@ local function rnd_voice()
     params:set(op_id("rel", i), math.random(30, 75))
     params:set(op_id("wave", i), (math.random() < 0.6) and 1 or math.random(1, #WAVES))
     params:set(op_id("ks", i), math.random(0, 40))
-    params:set(op_id("vs", i), math.random(0, 6))
+    params:set(op_id("vs", i), math.random(0, 5))
     params:set(op_id("ame", i), (math.random() < 0.3) and 2 or 1)
-    params:set(op_id("krs", i), math.random(0, 3))
+    -- rate scaling is drastic on the chip (3 = envelopes 16x faster four
+    -- octaves up), so mostly 0 or 1, as real patches do
+    params:set(op_id("krs", i), ({ 0, 0, 0, 1, 1, 2 })[math.random(1, 6)])
     params:set(op_id("ebs", i), 0)
-    params:set(op_id("fixed", i), (math.random() < 0.08) and 2 or 1)
+    -- the DX100 has no fixed-frequency mode; a fixed modulator also
+    -- changes timbre with every key, which reads as a broken patch
+    params:set(op_id("fixed", i), 1)
   end
   flash("VOICE", "rnd")
 end
