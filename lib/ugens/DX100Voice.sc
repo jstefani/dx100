@@ -22,7 +22,7 @@ DX100Voice : MultiOutUGen {
 		g1 = 0.5, g2 = 0.5, g3 = 0.5, g4 = 0.5,
 		k1 = 0, k2 = 0, k3 = 0, k4 = 0,
 		v1 = 0, v2 = 0, v3 = 0, v4 = 0,
-		rateScale = 0;
+		rateScale = 0, oversample = 1;
 		^this.multiNew('audio',
 			hz, gate, vel, legato, t_trig,
 			algo, feedback, dxFeedback,
@@ -36,7 +36,7 @@ DX100Voice : MultiOutUGen {
 			a1, a2, a3, a4, b1, b2, b3, b4,
 			c1, c2, c3, c4, e1, e2, e3, e4,
 			g1, g2, g3, g4, k1, k2, k3, k4,
-			v1, v2, v3, v4, rateScale
+			v1, v2, v3, v4, rateScale, oversample
 		);
 	}
 

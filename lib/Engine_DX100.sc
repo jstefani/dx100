@@ -5,7 +5,9 @@
 // one-shot and unipolar.
 
 Engine_DX100 : CroneEngine {
-	classvar <maxVoices = 8;
+	// Raised from 8 after the UGen optimisation cut per-voice cost ~4x
+	// (8 voices went from 95% to 26% of the audio thread on a norns).
+	classvar <maxVoices = 16;
 
 	var <gr;
 	var <fxBus;
@@ -22,6 +24,7 @@ Engine_DX100 : CroneEngine {
 	var <headroom;
 	var fxAlive;
 	var charMix, chorusMix, phaserMix;
+	var sleepGen;
 
 	*new { arg context, doneCallback;
 		^super.new(context, doneCallback);
@@ -53,7 +56,7 @@ Engine_DX100 : CroneEngine {
 			// key scaling + velocity sensitivity per operator
 			k1 = 0, k2 = 0, k3 = 0, k4 = 0,
 			v1 = 0, v2 = 0, v3 = 0, v4 = 0,
-			rateScale = 0;
+			rateScale = 0, oversample = 1;
 
 			var envGate, kill, v, snd, envSum;
 
@@ -74,7 +77,7 @@ Engine_DX100 : CroneEngine {
 				a1, a2, a3, a4, b1, b2, b3, b4,
 				c1, c2, c3, c4, e1, e2, e3, e4,
 				g1, g2, g3, g4, k1, k2, k3, k4,
-				v1, v2, v3, v4, rateScale
+				v1, v2, v3, v4, rateScale, oversample
 			);
 			snd = v[0];
 			envSum = v[1];
@@ -204,7 +207,7 @@ Engine_DX100 : CroneEngine {
 			\g1, \g2, \g3, \g4,
 			\k1, \k2, \k3, \k4,
 			\v1, \v2, \v3, \v4,
-			\rateScale
+			\rateScale, \oversample
 			// NOTE: drive/hiss/bits/srate/glitch/chorus/phaser are NOT
 			// here -- they are post-mix insert controls, not voice buses.
 		].do({ arg name;
@@ -253,6 +256,7 @@ Engine_DX100 : CroneEngine {
 			ctlBus[k].setSynchronous([0.3, 0.5, 0.5, 0.5][i]);
 		});
 		ctlBus[\rateScale].setSynchronous(0);
+		ctlBus[\oversample].setSynchronous(1);
 
 		// voices -> private stereo bus -> gated inserts -> limiter/out.
 		fxBus = Bus.audio(context.server, 2);
@@ -264,6 +268,7 @@ Engine_DX100 : CroneEngine {
 		fxOut = Synth.tail(fxGroup, \dx100out,
 			[\bus, fxBus.index, \out, context.out_b.index]);
 		fxAlive = true;
+		sleepGen = IdentityDictionary.new;
 		charMix = IdentityDictionary[
 			\hiss -> 0, \bits -> 0, \srate -> 0, \drive -> 0, \glitch -> 0
 		];
@@ -287,7 +292,7 @@ Engine_DX100 : CroneEngine {
 				charMix[name] = msg[1];
 				fxChar.set(name, msg[1]);
 				if(charMix.values.any({ arg v; v > 0 }), {
-					fxChar.run(true);
+					this.wakeFx(fxChar);
 				}, {
 					this.sleepFx(fxChar, {
 						charMix.values.any({ arg v; v > 0 }).not
@@ -299,7 +304,7 @@ Engine_DX100 : CroneEngine {
 			chorusMix = msg[1];
 			fxChorus.set(\chorus, chorusMix);
 			if(chorusMix > 0, {
-				fxChorus.run(true);
+				this.wakeFx(fxChorus);
 			}, {
 				this.sleepFx(fxChorus, { chorusMix <= 0 });
 			});
@@ -313,7 +318,7 @@ Engine_DX100 : CroneEngine {
 			phaserMix = msg[1];
 			fxPhaser.set(\phaser, phaserMix);
 			if(phaserMix > 0, {
-				fxPhaser.run(true);
+				this.wakeFx(fxPhaser);
 			}, {
 				this.sleepFx(fxPhaser, { phaserMix <= 0 });
 			});
@@ -468,11 +473,26 @@ Engine_DX100 : CroneEngine {
 	}
 
 	// Pause after mix lag (80–100ms) so the wet fade finishes first.
+	// Every call used to queue its own timer, so automating a character
+	// param stacked one pending sleep per message, all firing later. Keep
+	// a generation counter per synth and let only the newest one act.
 	sleepFx { arg syn, stillOff;
+		var gen;
+		gen = (sleepGen[syn] ? 0) + 1;
+		sleepGen[syn] = gen;
 		SystemClock.sched(0.12, {
-			if(fxAlive and: { stillOff.value }, { syn.run(false) });
+			if(fxAlive
+				and: { sleepGen[syn] == gen }
+				and: { stillOff.value },
+				{ syn.run(false) });
 			nil;
 		});
+	}
+
+	// Cancel any pending sleep for a synth we are about to wake.
+	wakeFx { arg syn;
+		sleepGen[syn] = (sleepGen[syn] ? 0) + 1;
+		syn.run(true);
 	}
 
 	free {

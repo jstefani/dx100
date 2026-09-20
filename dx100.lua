@@ -127,6 +127,14 @@ local LFO_FX = {
   phaser = 0, phaser_rate = 25, phaser_width = 50,
 }
 
+-- Params that are NOT part of a voice: filled in on pset load if the file
+-- predates them, but never touched by load voice / randomise, which only
+-- shape the patch. oversample is a cpu/quality choice, not a sound design
+-- one -- randomising it would silently change the cpu budget.
+local NON_VOICE_DEFAULTS = {
+  oversample = 1,
+}
+
 local function reset_lfo_fx(silent)
   for id, v in pairs(LFO_FX) do
     params:set(id, v, silent)
@@ -976,7 +984,7 @@ function init()
     flash("VOICE", ({ "mono", "poly" })[x])
   end)
   params:set_save("voice_mode", true)
-  params:add_number("max_voices", "max voices", 1, 8, 8)
+  params:add_number("max_voices", "max voices", 1, 16, 8)
   params:set_action("max_voices", function(x)
     engine.max_voices(x)
     flash("MAX", x)
@@ -1034,6 +1042,18 @@ function init()
     flash("CLEAR", "noise")
   end)
 
+  -- FM folds its own sidebands back below Nyquist. Measured on the
+  -- default patch at 48k: 1.4% of the energy is inharmonic at A2, 6.4% at
+  -- A4, 38.9% at A6, and up to 70% with feedback at max. That grit is
+  -- part of how 4-op FM hardware sounds, so "off" stays the default;
+  -- oversampling trades cpu for a cleaner top end.
+  params:add_option("oversample", "oversample",
+    { "off", "2x", "4x" }, 1)
+  params:set_action("oversample", function(x)
+    engine.oversample(({ 1, 2, 4 })[x])
+    flash("OVERSAMP", ({ "off", "2x", "4x" })[x])
+  end)
+
   params:add_separator("headroom (wip)")
   -- temporary controls while we dial in polyphonic level. once a good
   -- pair is found these get hard-coded and the params removed.
@@ -1086,6 +1106,11 @@ function init()
       end
     end
     for id, v in pairs(LFO_FX) do
+      if not present[id] then
+        params:set(id, v, silent)
+      end
+    end
+    for id, v in pairs(NON_VOICE_DEFAULTS) do
       if not present[id] then
         params:set(id, v, silent)
       end

@@ -78,3 +78,28 @@ nm -C <file> | grep gSineTable    # present only in the optimized build
 Both paths must hold the same binary, and scsynth only picks up a new one
 on **SYSTEM > RESTART** — swapping the file under a running server does
 nothing, since the old one stays mapped.
+
+## oversampling
+
+FM generates sidebands above Nyquist that fold back as inharmonic energy.
+Measured on the default patch at 48k (share of spectral energy that is
+not near a harmonic of f0):
+
+| note | off | 2x | 4x |
+|---|---|---|---|
+| A2 (110 Hz) | 1.4% | 0.3% | 0.1% |
+| A4 (440 Hz) | 6.4% | 1.7% | 0.3% |
+| A6 (1760 Hz) | 38.9% | 6.7% | 2.2% |
+
+Feedback dominates it far more than `kModIndex` does: at A4, fb=0 gives
+1.6% and fb=1.0 gives 70%.
+
+`oversample` (PARAMS, 1/2/4) runs **only the oscillator core** at the
+higher rate — envelopes, LFO and PEG stay at base rate, since they do not
+fold. A 4th-order Butterworth lowpass at 0.45*sr runs at the oversampled
+rate before decimation. Cost is therefore sublinear: roughly 1.3x for 2x
+and 1.8x for 4x, not 2x/4x.
+
+Default is **off**: this aliasing is characteristic of 4-op FM hardware,
+and `os=1` is bit-identical to the build before oversampling existed
+(verified across all 16 algorithms).

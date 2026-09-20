@@ -137,6 +137,7 @@ enum {
 	i_k1, i_k2, i_k3, i_k4,
 	i_v1, i_v2, i_v3, i_v4,
 	i_rateScale,
+	i_oversample,
 	i_numInputs
 };
 
@@ -179,7 +180,39 @@ struct DX100Voice : public Unit {
 	uint32_t rng;
 	OpEnv env[4];
 	int oneshotDone;
+	// Decimation filter state: two cascaded biquads (4th-order Butterworth)
+	// run at the oversampled rate, so folded sidebands are attenuated
+	// before we throw samples away. Only used when oversampling is on.
+	float dz[2][2];
+	int lastOs;
 };
+
+// Direct-form-II transposed biquad.
+static inline float biquad(float x, const float* c, float* z) {
+	float y = c[0] * x + z[0];
+	z[0] = c[1] * x - c[3] * y + z[1];
+	z[1] = c[2] * x - c[4] * y;
+	return y;
+}
+
+// Butterworth lowpass at `fc` relative to `sr`, as two cascaded sections.
+// Q values for a 4th-order Butterworth: 0.54119610, 1.30656296.
+static void makeLowpass(float fc, float sr, float coef[2][5]) {
+	static const float qs[2] = { 0.54119610f, 1.30656296f };
+	float w0 = 2.f * kPi * fc / sr;
+	if (w0 > 3.0f) w0 = 3.0f;
+	float cw = cosf(w0), sw = sinf(w0);
+	for (int s = 0; s < 2; ++s) {
+		float alpha = sw / (2.f * qs[s]);
+		float b0 = (1.f - cw) * 0.5f, b1 = 1.f - cw, b2 = b0;
+		float a0 = 1.f + alpha, a1 = -2.f * cw, a2 = 1.f - alpha;
+		coef[s][0] = b0 / a0;
+		coef[s][1] = b1 / a0;
+		coef[s][2] = b2 / a0;
+		coef[s][3] = a1 / a0;
+		coef[s][4] = a2 / a0;
+	}
+}
 
 static float linexp(float x, float x0, float x1, float y0, float y1) {
 	if (x <= x0) return y0;
@@ -388,6 +421,8 @@ static void DX100Voice_Ctor(DX100Voice* unit) {
 	unit->pegLevel = 0.f;
 	unit->rng = 1u;
 	unit->oneshotDone = 0;
+	for (int s = 0; s < 2; ++s) unit->dz[s][0] = unit->dz[s][1] = 0.f;
+	unit->lastOs = 0;
 	SETCALC(DX100Voice_next);
 	// Do not calc in Ctor: IN0 can be garbage before wires connect,
 	// which left envelopes idle and every operator silent.
@@ -482,10 +517,6 @@ static void DX100Voice_next(DX100Voice* unit, int inNumSamples) {
 	for (int i = 0; i < 4; ++i) {
 		detMul[i] = exp2f_fast(det[i] * (1.f / 1200.f));
 	}
-	float velScale[4];
-	for (int i = 0; i < 4; ++i) {
-		velScale[i] = 1.f - vs[i] * (1.f - vel);
-	}
 	// Which ops can produce sound at all this block. Skips both the
 	// oscillator and its wave switch when an op is muted.
 	int opLive[4];
@@ -503,9 +534,32 @@ static void DX100Voice_next(DX100Voice* unit, int inNumSamples) {
 	const float keyTrack = log2f_fast(scaleFreq > 13.0815f
 		? scaleFreq * (1.f / 261.63f) : 0.05f);
 	const float scl = exp2f_fast(keyTrack * (-rateScale) * 0.5f);
-	float kScale[4];
+	// Oversampling factor: 1 (off), 2 or 4. FM folds its own sidebands, so
+	// running the oscillator core faster and lowpassing before decimation
+	// is the only way to reduce it. Cost scales with the factor, so this
+	// is a user choice, not a default.
+	int os = (int)(IN0(i_oversample) + 0.5f);
+	if (os < 1) os = 1;
+	if (os > 4) os = 4;
+	if (os == 3) os = 2;
+	const float recSrOs = recSr / (float)os;
+	float lpCoef[2][5];
+	if (os > 1) {
+		// Cut just under base-rate Nyquist, at the oversampled rate.
+		makeLowpass(unit->sr * 0.45f, unit->sr * (float)os, lpCoef);
+	}
+	if (os != unit->lastOs) {
+		// Factor changed: stale filter state belongs to a different rate.
+		for (int s = 0; s < 2; ++s) unit->dz[s][0] = unit->dz[s][1] = 0.f;
+		unit->lastOs = os;
+	}
+	// Velocity and key scaling are both per-op constants for the block;
+	// fold them into one multiplier so the sample loop does a single
+	// multiply against the envelope level.
+	float envScale[4];
 	for (int i = 0; i < 4; ++i) {
-		kScale[i] = exp2f_fast(keyTrack * (-ks[i]));
+		envScale[i] = (1.f - vs[i] * (1.f - vel))
+			* exp2f_fast(keyTrack * (-ks[i]));
 	}
 	// Envelope segment times, per op, resolved once per block.
 	float atkT[4], d1T[4], d2T[4], relT[4];
@@ -642,58 +696,81 @@ static void DX100Voice_next(DX100Voice* unit, int inNumSamples) {
 			oscF[i] = f;
 		}
 
-		float envS[4], envSum = 0.f;
+		float envS[4];
 		for (int i = 0; i < 4; ++i) {
-			envS[i] = unit->env[i].level * velScale[i] * kScale[i];
-			envSum += envS[i];
+			envS[i] = unit->env[i].level * envScale[i];
 		}
 
-		// op4 (feedback source)
-		unit->opPhase[3] = wrap01(unit->opPhase[3] + oscF[3] * recSr);
-		float fb = unit->fbLast * fbGain;
-		float pm4 = fb;
-		if (dxOn) {
-			float dxSeed = sinRad(kTwoPi * unit->opPhase[3] + fb);
-			pm4 += dxPiAmt * sinRad(kTwoPi * unit->opPhase[3] + fb
-				+ dxPiAmt * dxSeed);
-		}
-		float out4 = 0.f;
-		if (opLive[3] && envS[3] > 1e-6f) {
-			out4 = opWave(wave[3], unit->opPhase[3], pm4)
-				* envS[3] * level[3] * amod;
-		}
-		unit->fbLast = out4;
-		if (unit->fbLast > 1.f) unit->fbLast = 1.f;
-		if (unit->fbLast < -1.f) unit->fbLast = -1.f;
+		// Oscillator core. When oversampling, this inner loop runs `os`
+		// times per output sample at 1/os the phase increment; the last
+		// filtered value is the one we keep. Envelopes, LFO and PEG stay
+		// at base rate above -- they are not what folds.
+		float mix = 0.f;
+		for (int k = 0; k < os; ++k) {
+			// op4 (feedback source)
+			unit->opPhase[3] = wrap01(unit->opPhase[3] + oscF[3] * recSrOs);
+			float fb = unit->fbLast * fbGain;
+			float pm4 = fb;
+			if (dxOn) {
+				float dxSeed = sinRad(kTwoPi * unit->opPhase[3] + fb);
+				pm4 += dxPiAmt * sinRad(kTwoPi * unit->opPhase[3] + fb
+					+ dxPiAmt * dxSeed);
+			}
+			float out4 = 0.f;
+			if (opLive[3] && envS[3] > 1e-6f) {
+				out4 = opWave(wave[3], unit->opPhase[3], pm4)
+					* envS[3] * level[3] * amod;
+			}
+			unit->fbLast = out4;
+			if (unit->fbLast > 1.f) unit->fbLast = 1.f;
+			if (unit->fbLast < -1.f) unit->fbLast = -1.f;
 
-		// Ops resolve deepest-first so modulation is same-sample, as on
-		// the original hardware.
-		unit->opPhase[2] = wrap01(unit->opPhase[2] + oscF[2] * recSr);
-		float out3 = 0.f;
-		if (opLive[2] && envS[2] > 1e-6f) {
-			out3 = opWave(wave[2], unit->opPhase[2], rt.mod3_4 * out4)
-				* envS[2] * level[2] * amod;
-		}
+			// Ops resolve deepest-first so modulation is same-sample, as
+			// on the original hardware.
+			unit->opPhase[2] = wrap01(unit->opPhase[2] + oscF[2] * recSrOs);
+			float out3 = 0.f;
+			if (opLive[2] && envS[2] > 1e-6f) {
+				out3 = opWave(wave[2], unit->opPhase[2], rt.mod3_4 * out4)
+					* envS[2] * level[2] * amod;
+			}
 
-		unit->opPhase[1] = wrap01(unit->opPhase[1] + oscF[1] * recSr);
-		float out2 = 0.f;
-		if (opLive[1] && envS[1] > 1e-6f) {
-			out2 = opWave(wave[1], unit->opPhase[1],
-					rt.mod2_3 * out3 + rt.mod2_4 * out4)
-				* envS[1] * level[1] * amod;
-		}
+			unit->opPhase[1] = wrap01(unit->opPhase[1] + oscF[1] * recSrOs);
+			float out2 = 0.f;
+			if (opLive[1] && envS[1] > 1e-6f) {
+				out2 = opWave(wave[1], unit->opPhase[1],
+						rt.mod2_3 * out3 + rt.mod2_4 * out4)
+					* envS[1] * level[1] * amod;
+			}
 
-		unit->opPhase[0] = wrap01(unit->opPhase[0] + oscF[0] * recSr);
-		float out1 = 0.f;
-		if (opLive[0] && envS[0] > 1e-6f) {
-			out1 = opWave(wave[0], unit->opPhase[0],
-					rt.mod1_2 * out2 + rt.mod1_3 * out3 + rt.mod1_4 * out4)
-				* envS[0] * level[0] * amod;
-		}
+			unit->opPhase[0] = wrap01(unit->opPhase[0] + oscF[0] * recSrOs);
+			float out1 = 0.f;
+			if (opLive[0] && envS[0] > 1e-6f) {
+				out1 = opWave(wave[0], unit->opPhase[0],
+						rt.mod1_2 * out2 + rt.mod1_3 * out3
+						+ rt.mod1_4 * out4)
+					* envS[0] * level[0] * amod;
+			}
 
-		float mix = rt.car1 * out1 + rt.car2 * out2
-			+ rt.car3 * out3 + rt.car4 * out4;
+			mix = rt.car1 * out1 + rt.car2 * out2
+				+ rt.car3 * out3 + rt.car4 * out4;
+			if (os > 1) {
+				mix = biquad(mix, lpCoef[0], unit->dz[0]);
+				mix = biquad(mix, lpCoef[1], unit->dz[1]);
+			}
+		}
 		out[n] = mix * rt.norm;
+	}
+
+	// envSum feeds only A2K.kr -> Lag.kr in the SynthDef (the FreeSelf
+	// test), and A2K reads index 0 only. Writing all 64 samples was 63
+	// wasted stores plus a 4-add accumulation per sample; write the
+	// block's final value once. The output stays audio-rate because the
+	// sclang wrapper declares both outputs at `rate`.
+	float envSum = 0.f;
+	for (int i = 0; i < 4; ++i) {
+		envSum += unit->env[i].level * envScale[i];
+	}
+	for (int n = 0; n < inNumSamples; ++n) {
 		envOut[n] = envSum;
 	}
 }
