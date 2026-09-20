@@ -58,7 +58,6 @@ local sounding = {} -- [root] = { engine ids }
 local grid_held = {}
 local sustain = false
 local sustained = {}
-local last_note = 48
 
 -- chord memory: intervals from the played key. "off" is a single note.
 local CHORDS = {
@@ -206,7 +205,6 @@ local function start_chord(root, vel, legato)
     lfo_sh_val = math.random() * 2 - 1
   end
   sounding[root] = ids
-  last_note = root
   screen_dirty = true
   grid_dirty = true
 end
@@ -544,9 +542,6 @@ function redraw()
   screen.font_size(8)
 
   -- header
-  screen.level(10)
-  screen.move(0, 7)
-  screen.text("DX100")
   screen.level(5)
   screen.move(35, 7)
   local shown = live_algo()
@@ -611,11 +606,8 @@ function redraw()
     screen.move(127, 63)
     screen.text_right(tostring(hud.val))
   else
-    screen.level(8)
-    screen.move(0, 63)
-    screen.text(MusicUtil.note_num_to_name(last_note, true))
     screen.level(4)
-    screen.move(34, 63)
+    screen.move(0, 63)
     screen.text(presets[params:get("preset")].name)
     screen.level(4)
     screen.move(127, 63)
