@@ -59,6 +59,7 @@ local sounding = {} -- [root] = { engine ids }
 local grid_held = {}
 local sustain = false
 local sustained = {}
+local bend = 0 -- pitch wheel, in semitones; rides on top of transpose
 
 -- chord memory: intervals from the played key. "off" is a single note.
 local CHORDS = {
@@ -251,12 +252,22 @@ local function note_off(note)
   screen_dirty = true
 end
 
+-- transpose is one global bus in the engine, so wheel bend is folded in
+-- here rather than given its own control.
+local function send_transpose()
+  engine.transpose(params:get("transpose") + bend)
+end
+
 local function all_off()
   stack = {}
   sounding = {}
   sustained = {}
   grid_held = {}
   engine.note_off_all()
+  if bend ~= 0 then
+    bend = 0
+    send_transpose()
+  end
   grid_dirty = true
   screen_dirty = true
 end
@@ -680,6 +691,10 @@ local function midi_event(data)
     else note_on(msg.note, msg.vel / 127) end
   elseif msg.type == "note_off" then
     note_off(msg.note)
+  elseif msg.type == "pitchbend" then
+    -- 14-bit, 8192 is centre
+    bend = (msg.val - 8192) / 8192 * params:get("bend_range")
+    send_transpose()
   elseif msg.type == "cc" then
     if msg.cc == 64 then
       sustain = msg.val >= 64
@@ -821,7 +836,7 @@ function init()
   end)
   params:add_number("transpose", "transpose", -24, 24, 0)
   params:set_action("transpose", function(x)
-    engine.transpose(x)
+    send_transpose()
     flash("TRANSPOSE", x)
   end)
 
@@ -1050,6 +1065,11 @@ function init()
 
   params:add_separator("midi")
   params:add_number("midi_ch", "midi channel", 0, 16, 0)
+  params:add_number("bend_range", "bend range", 0, 12, 2,
+    function(p) return p:get() .. " st" end)
+  params:set_action("bend_range", function()
+    if bend ~= 0 then send_transpose() end
+  end)
 
   params.action_read = function(filename, silent)
     -- keys missing from older psets keep whatever the last patch had.
