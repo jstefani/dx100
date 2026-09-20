@@ -123,6 +123,7 @@ local lfo_sh_tick = -1
 local lfo_sh_val = 0
 local lfo_shot_t = nil
 local sysex_buf = nil -- bytes of a sysex message still arriving over midi
+local reading_pset = false -- true while params:read() restores a pset
 
 local function shifted()
   return _menu.alt == true
@@ -372,7 +373,9 @@ local function set_preset_range()
   local pp = params:lookup_param("preset")
   pp.max = #presets
   pp.range = pp.max - pp.min
-  if params:get("preset") > #presets then params:set("preset", #presets) end
+  if params:get("preset") > #presets then
+    params:set("preset", #presets, true)
+  end
 end
 
 -- append voices to the preset list, after the factory ones
@@ -1278,11 +1281,11 @@ function init()
   end)
 
   params:add_separator("presets")
-  -- selecting only points at a voice; K1+E1 or "load voice" applies it,
-  -- so reading a pset does not overwrite its operators with a preset.
+  -- selecting a voice loads it. not while a pset is being read, though:
+  -- that would overwrite the operators the pset just restored.
   params:add_number("preset", "voice", 1, #presets, 1)
   params:set_action("preset", function(x)
-    if ready and presets[x] then flash("VOICE", presets[x].name) end
+    if ready and not reading_pset then load_preset(x) end
   end)
   params:add_trigger("load_preset", "load voice")
   params:set_action("load_preset", function()
@@ -1298,6 +1301,15 @@ function init()
   params:set_action("bend_range", function()
     if bend ~= 0 then send_transpose() end
   end)
+
+  -- the menu calls params:read(); flag it so the preset action stays quiet
+  local pset_read = params.read
+  params.read = function(self, ...)
+    reading_pset = true
+    local ok, err = pcall(pset_read, self, ...)
+    reading_pset = false
+    if not ok then error(err, 0) end
+  end
 
   params.action_read = function(filename, silent)
     -- keys missing from older psets keep whatever the last patch had.
@@ -1379,8 +1391,7 @@ function enc(n, d)
   if dismiss_splash() then return end
   if shifted() then
     if n == 1 then
-      params:delta("preset", d)
-      load_preset(params:get("preset"))
+      params:delta("preset", d) -- the action loads it
     elseif n == 2 then
       params:delta(op_id("ratio", cur_op), d)
     else
