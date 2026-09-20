@@ -3,7 +3,14 @@
 Yamaha 4-operator FM for monome norns — DX100 / DX21 / DX27 / TX81Z territory.
 
 Four operators, the eight Yamaha algorithms, feedback on op 4, per-operator
-rate/level envelopes, and the TX81Z operator waveform set. Mono or 8-voice poly.
+rate/level envelopes, and the TX81Z operator waveform set. Mono or 16-voice poly.
+
+The voice follows the DX100's YM2164 chip rather than a generic FM model:
+levels, key scaling, velocity and amplitude modulation are all in dB, the
+envelope runs in dB (linear decays, exponential-approach attack), a level-99
+modulator swings the carrier by 8π, feedback averages the last two samples,
+operator phases reset on key-on, and one LFO is shared by all voices with a
+key-sync switch. The 64 frequency ratios are the ones printed in the manual.
 
 ## install
 
@@ -27,14 +34,17 @@ from SELECT.
 ## play
 
 Grid, or MIDI (any channel by default; set one in PARAMS > midi). Rows are a
-fourth apart. Sustain pedal and CC 1 → pitch mod are wired up; CC 123 panics.
+fourth apart. Sustain pedal, mod wheel (CC 1), breath (CC 2) and volume (CC 7)
+are wired up; CC 123 panics. Wheel and breath depth, breath pitch bias and
+breath EG bias live under PARAMS > wheel / breath, as on the hardware's
+performance page.
 
 ## keys
 
 | control | action |
 | --- | --- |
-| E1 | algorithm (1–8) |
-| E2 | feedback |
+| E1 | algorithm (1–8 Yamaha, 9–16 extra) |
+| E2 | feedback (0–7) |
 | E3 | level of the selected operator |
 | K2 | select operator |
 | K3 | randomize voice |
@@ -53,8 +63,15 @@ operator's ratio, wave, level, and its rate/level envelope drawn as a curve.
 ## the FM part
 
 Every operator has a **ratio** (multiple of the note frequency) or a **fixed**
-frequency in Hz, plus detune in cents. Ratios that are small integers give
-harmonic, instrument-like tones; non-integer ratios give bells and metal.
+frequency in Hz, plus detune (±3, about 0.9 cents a step). The ratio table is
+the DX100's: 0.5 and the integers to 15, interleaved with √2, π/2 and √3
+multiples up to 25.95. Integers give harmonic, instrument-like tones; the
+irrational entries give bells and metal.
+
+**Level** is in dB, 0.75 dB per step near the top of the range: 90 is −7 dB,
+80 is −14 dB, 66 is −25 dB, 50 is −37 dB. A modulator around 65–75 is a gentle
+index, 80–90 is brash. Numbers from a DX100/DX21/TX81Z patch sheet carry over
+directly.
 
 The envelope follows Yamaha's shape rather than ADSR:
 
@@ -64,25 +81,48 @@ The envelope follows Yamaha's shape rather than ADSR:
 - **RR** release rate
 
 All rates are *rates*, so **higher is faster** — the inverse of a time control.
+D1R and D2R at 0 hold their level (D2R 0 = sustain at D1L, as on the
+hardware). The envelope moves in dB, so decays are exponential in amplitude,
+and the attack is the chip's fast-start exponential approach.
 An operator used as a modulator has its envelope shape the *timbre* over the
 note, which is the whole trick of FM: percussive modulator envelopes give a
 struck attack that decays to a purer tone.
 
 **Key scale** rolls an operator off toward the top of the keyboard (real
-instruments get less bright as they get higher). **Velocity** sets how much
-velocity opens that operator — put it high on modulators for a patch that
-gets brighter as you play harder.
+instruments get less bright as they get higher). **Velocity** (0–7) sets how
+much velocity opens that operator — put it high on modulators for a patch that
+gets brighter as you play harder. **Rate scaling** (0–3) shortens the envelope
+as pitch rises; 3 halves the times per octave. **Amp mod** picks which
+operators the LFO's amplitude modulation reaches: carriers for tremolo,
+modulators for a wah. **EG bias** (0–7) is how far breath EG bias opens the
+operator.
+
+## lfo and pitch eg
+
+One LFO for all voices. **Key sync** restarts it at its peak on every key-on,
+as the hardware does; off, it free-runs so chords shimmer against it. Pitch
+mod at 99 is ±800 cents, amp mod at 99 is 96 dB. **Delay** holds, then fades
+the LFO in over the same time (up to 10.7 s).
+
+The pitch EG is the DX21/TX81Z three-stage one (the DX100 has none): on
+key-on the pitch runs from where it rests (level 3) to level 1 at rate 1,
+then to level 2 at rate 2 and holds; on key-off it returns to level 3 at
+rate 3. 50 is no shift, 0/99 is ∓/± 4 octaves.
 
 ## character
 
-The DX100's 12-bit DAC and its aliasing are half the sound. The character
-section adds them back: bit crush, downsampling, drive, glitch and hiss.
-All default to off.
+**opp grit** (on by default) runs the oscillator with a 10-bit sine phase and
+no interpolation, and steps the envelope in 0.09 dB, like the chip. The rest
+of the section adds the DAC and its aliasing back on the mix: bit crush,
+downsampling, drive, glitch and hiss. Those default to off.
 
 ## factory voices
 
 `solid bass`, `e.piano`, `brass`, `glass bell`, `wood marimba`,
 `lately bass`, `hollow pad`, `clav` — in PARAMS > presets, or K1+E1.
-These are starting points, not clones of the ROM patches.
+They are written in hardware units in `lib/presets.lua` (level 0–99, rates
+0–31, D1L 0–15, RR 0–15), so a DX100/DX21/TX81Z patch sheet can be typed in
+as-is. `e.piano` is the owner's manual tutorial voice. They are starting
+points, not clones of the ROM patches.
 
 Anything you build saves with the usual PARAMS > PSET menu.

@@ -1,5 +1,11 @@
 # Handoff: polyphonic distortion in dx100
 
+> Branch `hardware-accuracy` (Sep 2026) reworked the voice: the LFO is now
+> one shared synth with key sync (no more per-voice free-running LFOs),
+> levels are dB, carriers sum raw, and the modulation index is 8π. The
+> "per-voice LFO" suspect below is therefore gone; re-test the symptom on
+> that branch before chasing the rest of this list.
+
 Unresolved bug. Written by the previous model after several wrong turns,
 so that the next attempt doesn't repeat them.
 

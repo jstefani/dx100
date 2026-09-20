@@ -22,17 +22,33 @@ local ALGOS = 16
 local OPS = 4
 local WAVES = { "sin", "half", "abs", "quart", "alt", "alt/2", "sq-sin", "saw" }
 local LFO_WAVES = { "tri", "sin", "sqr", "s&h", "up", "down" }
+-- the DX100's 64 frequency ratios (owner's manual, p.34): integers plus
+-- sqrt2, pi/2 and sqrt3 multiples, sorted. index 5 = 1.00.
 local RATIOS = {
-  0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5,
-  6, 6.5, 7, 7.5, 8, 9, 10, 11, 12, 13, 14, 15, 16
+  0.50, 0.71, 0.78, 0.87, 1.00, 1.41, 1.57, 1.73, 2.00, 2.82, 3.00, 3.14,
+  3.46, 4.00, 4.24, 4.71, 5.00, 5.19, 5.65, 6.00, 6.28, 6.92, 7.00, 7.07,
+  7.85, 8.00, 8.48, 8.65, 9.00, 9.42, 9.89, 10.00, 10.38, 10.99, 11.00,
+  11.30, 12.00, 12.11, 12.56, 12.72, 13.00, 13.84, 14.00, 14.10, 14.13,
+  15.00, 15.55, 15.57, 15.70, 16.96, 17.27, 17.30, 18.37, 18.84, 19.03,
+  19.78, 20.41, 20.76, 21.20, 21.98, 22.49, 23.55, 24.22, 25.95
 }
+local RATIO_1 = 5 -- index of 1.00
+
+local function ratio_index(r)
+  local best, bd = RATIO_1, math.huge
+  for i, v in ipairs(RATIOS) do
+    local d = math.abs(v - r)
+    if d < bd then best, bd = i, d end
+  end
+  return best
+end
 
 -- carriers per algorithm (which ops reach the output)
--- 1–8 Yamaha DX100/TX81Z order (do not reorder: psets store these indices)
+-- 1–8 Yamaha DX100/TX81Z panel order (do not reorder: psets store these)
 -- 9–16 extra wirings
 local CARRIERS = {
-  { 1 }, { 1 }, { 1 }, { 1 }, { 1, 2 }, { 1, 2, 3 }, { 1, 2, 3 }, { 1, 2, 3, 4 },
-  { 1, 3 }, { 1, 2 }, { 1 }, { 1, 2, 3 }, { 1 }, { 1 }, { 1 }, { 1, 2 }
+  { 1 }, { 1 }, { 1 }, { 1 }, { 1, 3 }, { 1, 2, 3 }, { 1, 2, 3 }, { 1, 2, 3, 4 },
+  { 1, 2 }, { 1, 2 }, { 1 }, { 1, 2, 3 }, { 1 }, { 1 }, { 1 }, { 1, 2 }
 }
 -- modulation edges per algorithm: { from, to }
 local EDGES = {
@@ -40,11 +56,11 @@ local EDGES = {
   { { 4, 2 }, { 3, 2 }, { 2, 1 } },
   { { 3, 2 }, { 2, 1 }, { 4, 1 } },
   { { 4, 3 }, { 3, 1 }, { 2, 1 } },
-  { { 4, 3 }, { 3, 1 }, { 4, 2 } },
+  { { 2, 1 }, { 4, 3 } },                       -- 5  two 2-op pairs
   { { 4, 1 }, { 4, 2 }, { 4, 3 } },
   { { 4, 3 } },
   {},
-  { { 4, 3 }, { 2, 1 } },                       -- 9  dual 2-op
+  { { 4, 3 }, { 3, 1 }, { 4, 2 } },             -- 9  Y split (not on hw)
   { { 4, 3 }, { 3, 2 } },                       -- 10 3-stack + dry
   { { 4, 1 }, { 3, 1 }, { 2, 1 } },             -- 11 triple into 1
   { { 4, 3 }, { 4, 2 } },                       -- 12 fan 2 + dry
@@ -60,6 +76,8 @@ local grid_held = {}
 local sustain = false
 local sustained = {}
 local bend = 0 -- pitch wheel, in semitones; rides on top of transpose
+local wheel = 0 -- mod wheel 0..1
+local breath = 0 -- breath controller 0..1
 
 -- chord memory: intervals from the played key. "off" is a single note.
 local CHORDS = {
@@ -121,8 +139,12 @@ end
 -- defaults for LFO + chorus/phaser. psets written before these params
 -- existed omit them, so a load would keep the previous patch's values.
 local LFO_FX = {
-  lfo_rate = 30, lfo_wave = 1, lfo_uni = 1, lfo_oneshot = 1, lfo_delay = 0,
-  pms = 0, ams = 0, alms = 0,
+  lfo_rate = 35, lfo_wave = 1, lfo_uni = 1, lfo_oneshot = 1, lfo_sync = 2,
+  lfo_delay = 0, pms = 0, ams = 0, alms = 0,
+  peg_r1 = 99, peg_r2 = 99, peg_r3 = 99,
+  peg_l1 = 50, peg_l2 = 50, peg_l3 = 50,
+  mw_pitch = 99, mw_amp = 0,
+  bc_pitch = 0, bc_amp = 0, bc_pbias = 50, bc_egbias = 0,
   chorus = 0, chorus_rate = 40, chorus_width = 50,
   phaser = 0, phaser_rate = 25, phaser_width = 50,
 }
@@ -133,6 +155,7 @@ local LFO_FX = {
 -- one -- randomising it would silently change the cpu budget.
 local NON_VOICE_DEFAULTS = {
   oversample = 1,
+  grit = 2,
 }
 
 local function reset_lfo_fx(silent)
@@ -263,7 +286,21 @@ end
 -- transpose is one global bus in the engine, so wheel bend is folded in
 -- here rather than given its own control.
 local function send_transpose()
-  engine.transpose(params:get("transpose") + bend)
+  -- breath pitch bias: 50 = off, 0/99 = -/+ 4 octaves at full breath
+  local pb = (params:get("bc_pbias") - 50) / 50 * 48 * breath
+  engine.transpose(params:get("transpose") + bend + pb)
+end
+
+-- wheel and breath each add LFO depth on top of the voice's PMD/AMD,
+-- scaled by their own range params, as on the hardware.
+local function send_mod()
+  local pm = wheel * params:get("mw_pitch") / 99
+    + breath * params:get("bc_pitch") / 99
+  local am = wheel * params:get("mw_amp") / 99
+    + breath * params:get("bc_amp") / 99
+  engine.wheelPm(util.clamp(pm, 0, 1))
+  engine.wheelAm(util.clamp(am, 0, 1))
+  engine.breath(breath)
 end
 
 local function all_off()
@@ -287,29 +324,30 @@ local function load_preset(idx)
   if p == nil then return end
   reset_lfo_fx()
   params:set("algo", p.algo)
-  params:set("feedback", math.floor(p.fb * 99 + 0.5))
+  params:set("feedback", p.fb)
   params:set("dx_feedback", 0)
   params:set("transpose", p.transpose or 0)
+  -- presets are written in hardware units (see lib/presets.lua); the
+  -- params keep 0-99 for finer control, so rescale here.
+  local function r31(v) return math.floor(v / 31 * 99 + 0.5) end
+  local function r15(v) return math.floor(v / 15 * 99 + 0.5) end
   for i = 1, OPS do
     local o = p.ops[i]
     if o then
-      -- snap ratio to the nearest entry in the ratio table
-      local best, bd = 1, math.huge
-      for ri, rv in ipairs(RATIOS) do
-        local d = math.abs(rv - o.ratio)
-        if d < bd then best, bd = ri, d end
-      end
-      params:set(op_id("ratio", i), best)
+      params:set(op_id("ratio", i), ratio_index(o.ratio))
       params:set(op_id("det", i), o.det or 0)
-      params:set(op_id("level", i), math.floor(o.level * 99 + 0.5))
-      params:set(op_id("atk", i), math.floor(o.atk * 99 + 0.5))
-      params:set(op_id("d1r", i), math.floor(o.d1r * 99 + 0.5))
-      params:set(op_id("d1l", i), math.floor(o.d1l * 99 + 0.5))
-      params:set(op_id("d2r", i), math.floor(o.d2r * 99 + 0.5))
-      params:set(op_id("rel", i), math.floor(o.rel * 99 + 0.5))
+      params:set(op_id("level", i), o.level)
+      params:set(op_id("atk", i), r31(o.ar))
+      params:set(op_id("d1r", i), r31(o.d1r))
+      params:set(op_id("d1l", i), r15(o.d1l))
+      params:set(op_id("d2r", i), r31(o.d2r))
+      params:set(op_id("rel", i), r15(o.rr))
       params:set(op_id("wave", i), o.wave or 1)
-      params:set(op_id("ks", i), math.floor((o.ks or 0) * 99 + 0.5))
-      params:set(op_id("vs", i), math.floor((o.vs or 0.4) * 99 + 0.5))
+      params:set(op_id("ks", i), o.kls or 0)
+      params:set(op_id("vs", i), o.kvs or 0)
+      params:set(op_id("ame", i), (o.ame and 2) or 1)
+      params:set(op_id("krs", i), o.krs or 0)
+      params:set(op_id("ebs", i), o.ebs or 0)
       params:set(op_id("fixed", i), 1)
     end
   end
@@ -320,29 +358,34 @@ local function rnd_voice()
   reset_lfo_fx()
   local algo = math.random(1, ALGOS)
   params:set("algo", algo)
-  params:set("feedback", math.random(0, 85))
+  params:set("feedback", math.random(0, 6))
   params:set("dx_feedback", (math.random() < 0.35) and math.random(0, 80) or 0)
   for i = 1, OPS do
     local carrier = false
     for _, c in ipairs(CARRIERS[algo]) do
       if c == i then carrier = true end
     end
-    -- carriers stay near simple ratios; modulators roam
+    -- carriers stay near simple ratios; modulators roam the whole table
     if carrier or math.random() < 0.5 then
-      params:set(op_id("ratio", i), ({ 4, 4, 4, 8, 10, 12 })[math.random(1, 6)])
+      params:set(op_id("ratio", i),
+        ({ RATIO_1, RATIO_1, RATIO_1, 9, 1, 14 })[math.random(1, 6)])
     else
       params:set(op_id("ratio", i), math.random(1, #RATIOS))
     end
-    params:set(op_id("det", i), math.random(-7, 7))
-    params:set(op_id("level", i), carrier and math.random(70, 99) or math.random(20, 90))
+    params:set(op_id("det", i), math.random(-3, 3))
+    -- levels are dB: a 60 modulator is already -29 dB, so keep them high
+    params:set(op_id("level", i), carrier and math.random(85, 99) or math.random(45, 95))
     params:set(op_id("atk", i), (math.random() < 0.7) and math.random(85, 99) or math.random(30, 80))
-    params:set(op_id("d1r", i), math.random(25, 85))
-    params:set(op_id("d1l", i), math.random(0, 90))
-    params:set(op_id("d2r", i), math.random(5, 60))
-    params:set(op_id("rel", i), math.random(35, 85))
+    params:set(op_id("d1r", i), math.random(20, 75))
+    params:set(op_id("d1l", i), math.random(0, 99))
+    params:set(op_id("d2r", i), math.random(0, 45))
+    params:set(op_id("rel", i), math.random(30, 75))
     params:set(op_id("wave", i), (math.random() < 0.6) and 1 or math.random(1, #WAVES))
     params:set(op_id("ks", i), math.random(0, 40))
-    params:set(op_id("vs", i), math.random(20, 80))
+    params:set(op_id("vs", i), math.random(0, 6))
+    params:set(op_id("ame", i), (math.random() < 0.3) and 2 or 1)
+    params:set(op_id("krs", i), math.random(0, 3))
+    params:set(op_id("ebs", i), 0)
     params:set(op_id("fixed", i), (math.random() < 0.08) and 2 or 1)
   end
   flash("VOICE", "rnd")
@@ -350,10 +393,15 @@ end
 
 -- ---------- drawing ----------
 
+-- LFO speed 0-99 -> 0.0008..55 Hz (manual), skewed so 50 is ~2 Hz
+local function lfo_hz(x)
+  return 0.0008 * (55 / 0.0008) ^ math.sqrt(x / 99)
+end
+
 -- engine LFO, for display. same waves/polarity/one-shot as Engine_DX100.
 -- delay is per-voice on note-on; the graph always shows the running LFO.
 local function lfo_value()
-  local hz = util.linexp(0, 99, 0.05, 40, params:get("lfo_rate"))
+  local hz = lfo_hz(params:get("lfo_rate"))
   local oneshot = params:get("lfo_oneshot") == 2
   local uni = params:get("lfo_uni") == 2
   local t = util.time()
@@ -414,11 +462,11 @@ local function algo_layout(algo)
     { [1] = { 1, 1 }, [2] = { 1, 2 }, [3] = { 1, 3 }, [4] = { 2, 3 } },
     { [1] = { 1, 1 }, [2] = { 1, 2 }, [3] = { 1, 3 }, [4] = { 2, 2 } },
     { [1] = { 1, 1 }, [2] = { 2, 2 }, [3] = { 1, 2 }, [4] = { 1, 3 } },
-    { [1] = { 1, 1 }, [2] = { 2, 1 }, [3] = { 1, 2 }, [4] = { 1, 3 } },
+    { [1] = { 1, 1 }, [2] = { 1, 2 }, [3] = { 2, 1 }, [4] = { 2, 2 } }, -- 5
     { [1] = { 1, 1 }, [2] = { 2, 1 }, [3] = { 3, 1 }, [4] = { 2, 2 } },
     { [1] = { 1, 1 }, [2] = { 2, 1 }, [3] = { 3, 1 }, [4] = { 3, 2 } },
     { [1] = { 1, 1 }, [2] = { 2, 1 }, [3] = { 3, 1 }, [4] = { 4, 1 } },
-    { [1] = { 2, 1 }, [2] = { 2, 2 }, [3] = { 1, 1 }, [4] = { 1, 2 } }, -- 9
+    { [1] = { 1, 1 }, [2] = { 2, 1 }, [3] = { 1, 2 }, [4] = { 1, 3 } }, -- 9
     { [1] = { 2, 1 }, [2] = { 1, 1 }, [3] = { 1, 2 }, [4] = { 1, 3 } }, -- 10
     { [1] = { 2, 1 }, [2] = { 3, 2 }, [3] = { 2, 2 }, [4] = { 1, 2 } }, -- 11
     { [1] = { 3, 1 }, [2] = { 2, 1 }, [3] = { 1, 1 }, [4] = { 2, 2 } }, -- 12
@@ -462,11 +510,11 @@ local function draw_algo(ox, oy)
   end
 
   -- feedback loop marker on op4 (either flavor)
-  local fb_show = math.max(params:get("feedback"), params:get("dx_feedback"))
+  local fb_show = math.max(params:get("feedback"), params:get("dx_feedback") / 99 * 7)
   if fb_show > 0 then
     local f = lay[4]
     local fx, fy = nx(f[1]), ny(f[2])
-    screen.level(util.round(util.linlin(0, 99, 2, 12, fb_show)))
+    screen.level(util.round(util.linlin(0, 7, 2, 12, fb_show)))
     screen.move(fx + 8, fy + 1)
     screen.line(fx + 11, fy + 1)
     screen.line(fx + 11, fy + 7)
@@ -678,7 +726,7 @@ local function arc_redraw()
   local n = cur_op
   local vals = {
     params:get(op_id("level", n)) / 99,
-    params:get("feedback") / 99,
+    params:get("feedback") / 7,
     params:get(op_id("d1r", n)) / 99,
     params:get(op_id("rel", n)) / 99,
   }
@@ -711,7 +759,14 @@ local function midi_event(data)
         sustained = {}
       end
     elseif msg.cc == 1 then
-      params:set("pms", math.floor(msg.val / 127 * 99))
+      wheel = msg.val / 127
+      send_mod()
+    elseif msg.cc == 2 then
+      breath = msg.val / 127
+      send_mod()
+      if params:get("bc_pbias") ~= 50 then send_transpose() end
+    elseif msg.cc == 7 then
+      params:set("amp", msg.val / 127)
     elseif msg.cc == 123 then
       all_off()
     end
@@ -726,12 +781,13 @@ local function add_op_params(n)
     wave = { "w", n }, level = { "l", n },
     atk = { "a", n }, d1r = { "b", n }, d1l = { "c", n },
     d2r = { "e", n }, rel = { "g", n }, ks = { "k", n }, vs = { "v", n },
+    ame = { "m", n }, krs = { "s", n }, ebs = { "z", n },
   }
   local function cmd(key)
     return eng[key][1] .. eng[key][2]
   end
 
-  params:add_group("op " .. n, 13)
+  params:add_group("op " .. n, 16)
 
   params:add_option(op_id("ratio", n), "ratio", (function()
     local t = {}
@@ -739,13 +795,14 @@ local function add_op_params(n)
       t[i] = (r == math.floor(r)) and string.format("%d", r) or string.format("%.2f", r)
     end
     return t
-  end)(), 4)
+  end)(), RATIO_1)
   params:set_action(op_id("ratio", n), function(x)
     engine[cmd("ratio")](RATIOS[x])
     flash("OP" .. n .. " RATIO", RATIOS[x])
   end)
 
-  params:add_number(op_id("det", n), "detune", -50, 50, 0)
+  -- hardware: -3..+3, about 0.87 cents per step
+  params:add_number(op_id("det", n), "detune", -3, 3, 0)
   params:set_action(op_id("det", n), function(x)
     engine[cmd("det")](x)
     flash("OP" .. n .. " DET", x)
@@ -770,8 +827,9 @@ local function add_op_params(n)
     flash("OP" .. n .. " WAVE", WAVES[x])
   end)
 
+  -- 0.75 dB per step near the top: 90 = -7 dB, 80 = -14 dB, 50 = -37 dB
   params:add_number(op_id("level", n), "level", 0, 99,
-    ({ 99, 75, 60, 50 })[n])
+    ({ 99, 82, 72, 65 })[n])
   params:set_action(op_id("level", n), function(x)
     engine[cmd("level")](x / 99)
     flash("OP" .. n .. " LVL", x)
@@ -790,7 +848,7 @@ local function add_op_params(n)
   end)
 
   params:add_number(op_id("d1l", n), "decay 1 level", 0, 99,
-    ({ 80, 50, 40, 30 })[n])
+    ({ 85, 65, 55, 50 })[n])
   params:set_action(op_id("d1l", n), function(x)
     engine[cmd("d1l")](x / 99)
     flash("OP" .. n .. " D1L", x)
@@ -802,7 +860,7 @@ local function add_op_params(n)
     flash("OP" .. n .. " D2R", x)
   end)
 
-  params:add_number(op_id("rel", n), "release rate", 0, 99, 55)
+  params:add_number(op_id("rel", n), "release rate", 0, 99, 40)
   params:set_action(op_id("rel", n), function(x)
     engine[cmd("rel")](x / 99)
     flash("OP" .. n .. " RR", x)
@@ -814,11 +872,31 @@ local function add_op_params(n)
     flash("OP" .. n .. " KS", x)
   end)
 
-  params:add_number(op_id("vs", n), "velocity", 0, 99,
-    ({ 30, 50, 50, 50 })[n])
+  params:add_number(op_id("vs", n), "velocity", 0, 7,
+    ({ 2, 4, 4, 4 })[n])
   params:set_action(op_id("vs", n), function(x)
-    engine[cmd("vs")](x / 99)
+    engine[cmd("vs")](x / 7)
     flash("OP" .. n .. " VEL", x)
+  end)
+
+  -- which operators the LFO's amplitude modulation reaches
+  params:add_option(op_id("ame", n), "amp mod", { "off", "on" }, 1)
+  params:set_action(op_id("ame", n), function(x)
+    engine[cmd("ame")](x - 1)
+    flash("OP" .. n .. " AME", ({ "off", "on" })[x])
+  end)
+
+  -- envelope speeds up with pitch: 3 = rates double per octave
+  params:add_number(op_id("krs", n), "rate scaling", 0, 3, 0)
+  params:set_action(op_id("krs", n), function(x)
+    engine[cmd("krs")](x)
+    flash("OP" .. n .. " KRS", x)
+  end)
+
+  params:add_number(op_id("ebs", n), "eg bias", 0, 7, 0)
+  params:set_action(op_id("ebs", n), function(x)
+    engine[cmd("ebs")](x / 7)
+    flash("OP" .. n .. " EBS", x)
   end)
 end
 
@@ -832,9 +910,9 @@ function init()
     flash("ALGORITHM", x)
     screen_dirty = true
   end)
-  params:add_number("feedback", "feedback", 0, 99, 40)
+  params:add_number("feedback", "feedback", 0, 7, 5)
   params:set_action("feedback", function(x)
-    engine.feedback(x / 99)
+    engine.feedback(x)
     flash("FEEDBACK", x)
   end)
   params:add_number("dx_feedback", "dx feedback", 0, 99, 0)
@@ -853,9 +931,9 @@ function init()
   end
 
   params:add_separator("lfo")
-  params:add_number("lfo_rate", "rate", 0, 99, 30)
+  params:add_number("lfo_rate", "rate", 0, 99, 35)
   params:set_action("lfo_rate", function(x)
-    local hz = util.linexp(0, 99, 0.05, 40, x)
+    local hz = lfo_hz(x)
     engine.lfoRate(hz)
     flash("LFO", string.format("%.2fHz", hz))
   end)
@@ -868,6 +946,11 @@ function init()
   params:set_action("lfo_uni", function(x)
     engine.lfoUni(x - 1)
     flash("LFO", ({ "bipolar", "unipolar" })[x])
+  end)
+  params:add_option("lfo_sync", "key sync", { "off", "on" }, 2)
+  params:set_action("lfo_sync", function(x)
+    engine.lfoSync(x - 1)
+    flash("LFO SYNC", ({ "off", "on" })[x])
   end)
   params:add_option("lfo_oneshot", "one-shot", { "off", "on" }, 1)
   params:set_action("lfo_oneshot", function(x)
@@ -895,28 +978,52 @@ function init()
     flash("ALMS", x)
   end)
 
+  -- DX21/TX81Z pitch EG (the DX100 itself has none). On key-on the
+  -- pitch moves from where it rests (L3) to L1 at R1, then to L2 at R2
+  -- and holds; on key-off it returns to L3 at R3. 50 = no shift,
+  -- 0/99 = -/+ 4 octaves.
   params:add_separator("pitch eg")
-  params:add_number("peg_amt", "amount", -99, 99, 0)
-  params:set_action("peg_amt", function(x)
-    engine.pitchEgAmt(x / 99)
-    flash("PEG", x)
-  end)
-  params:add_number("peg_rate", "rate", 0, 99, 50)
-  params:set_action("peg_rate", function(x)
-    engine.pitchEgRate(x / 99)
-    flash("PEG RATE", x)
-  end)
-  params:add_number("peg_level", "init level", 0, 99, 99)
-  params:set_action("peg_level", function(x)
-    engine.pitchEgLevel(x / 99)
-    flash("PEG LVL", x)
+  for i = 1, 3 do
+    params:add_number("peg_r" .. i, "rate " .. i, 0, 99, 99)
+    params:set_action("peg_r" .. i, function(x)
+      engine["pr" .. i](x / 99)
+      flash("PEG R" .. i, x)
+    end)
+  end
+  for i = 1, 3 do
+    params:add_number("peg_l" .. i, "level " .. i, 0, 99, 50)
+    params:set_action("peg_l" .. i, function(x)
+      engine["pl" .. i]((x - 50) / 50)
+      flash("PEG L" .. i, x)
+    end)
+  end
+
+  -- performance ranges: how far the wheel and breath controller push
+  -- the LFO (on top of pitch mod / amp mod), and breath bias.
+  params:add_separator("wheel / breath")
+  params:add_number("mw_pitch", "wheel pitch", 0, 99, 99)
+  params:set_action("mw_pitch", function() send_mod() end)
+  params:add_number("mw_amp", "wheel amp", 0, 99, 0)
+  params:set_action("mw_amp", function() send_mod() end)
+  params:add_number("bc_pitch", "breath pitch", 0, 99, 0)
+  params:set_action("bc_pitch", function() send_mod() end)
+  params:add_number("bc_amp", "breath amp", 0, 99, 0)
+  params:set_action("bc_amp", function() send_mod() end)
+  params:add_number("bc_pbias", "breath pitch bias", 0, 99, 50)
+  params:set_action("bc_pbias", function() send_transpose() end)
+  params:add_number("bc_egbias", "breath eg bias", 0, 99, 0)
+  params:set_action("bc_egbias", function(x)
+    engine.egBias(x / 99)
+    flash("EG BIAS", x)
   end)
 
   params:add_separator("character")
-  params:add_number("rate_scale", "rate scaling", 0, 99, 0)
-  params:set_action("rate_scale", function(x)
-    engine.rateScale(x / 99)
-    flash("RATE SCL", x)
+  -- chip-style oscillator and envelope: 10-bit sine phase with no
+  -- interpolation, envelope stepped in 0.09 dB. Off = clean tables.
+  params:add_option("grit", "opp grit", { "off", "on" }, 2)
+  params:set_action("grit", function(x)
+    engine.grit(x - 1)
+    flash("GRIT", ({ "off", "on" })[x])
   end)
   params:add_number("bits", "bit crush", 0, 99, 0)
   params:set_action("bits", function(x)
@@ -1030,8 +1137,7 @@ function init()
     -- heavy feedback, and fixed-frequency operators (in fixed mode an
     -- operator runs at the same constant hz in every voice, so voices
     -- sum coherently and beat against each other).
-    for _, id in ipairs({ "bits", "srate", "drive", "glitch", "hiss",
-                          "rate_scale" }) do
+    for _, id in ipairs({ "bits", "srate", "drive", "glitch", "hiss" }) do
       params:set(id, 0)
     end
     params:set("feedback", 0)

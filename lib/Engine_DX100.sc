@@ -1,8 +1,8 @@
 // Engine_DX100
 // Yamaha 4-operator FM (DX100 / DX21 / DX27 / TX81Z) style.
-// 8 algorithms, per-op rate/level envelopes, feedback on op4,
-// TX81Z-style operator waveforms, LFO with AMS/PMS/ALMS,
-// one-shot and unipolar.
+// 8 algorithms, per-op rate/level envelopes in the dB domain, feedback
+// on op4, TX81Z-style operator waveforms, one shared LFO with key sync,
+// AMS/PMS/ALMS, per-op AME, 3-stage pitch EG, wheel/breath ranges.
 
 Engine_DX100 : CroneEngine {
 	// Raised from 8 after the UGen optimisation cut per-voice cost ~4x
@@ -12,6 +12,10 @@ Engine_DX100 : CroneEngine {
 	var <gr;
 	var <fxBus;
 	var <fxGroup;
+	var <lfoBus;
+	var <lfoGroup;
+	var <fxLfo;
+	var <lfoSync;
 	var <fxChar, <fxChorus, <fxPhaser, <fxOut;
 	var <voices;
 	var <voiceOrder;
@@ -32,52 +36,60 @@ Engine_DX100 : CroneEngine {
 
 	alloc {
 		SynthDef(\dx100, {
-			arg out, hz = 220, gate = 0, vel = 1, legato = 0, t_trig = 0,
+			arg out, lfoBus, hz = 220, gate = 0, vel = 1, legato = 0,
 			persist = 0, killGate = 1, voiceScale = 1, headroom = 1,
 			algo = 0, feedback = 0, dxFeedback = 0, amp = 0.4, pan = 0, transpose = 0,
 			port = 0, portMode = 0,
-			lfoRate = 4, lfoWave = 0, lfoDelay = 0, lfoOneshot = 0, lfoUni = 0,
-			pms = 0, ams = 0, alms = 0,
-			pitchEgAmt = 0, pitchEgRate = 0.5, pitchEgLevel = 0,
-			// per-operator: ratio, detune (cents), fixed hz, fixed mode, wave, level
+			lfoDelay = 0, lfoUni = 0,
+			pms = 0, ams = 0, alms = 0, wheelPm = 0, wheelAm = 0,
+			pr1 = 0.5, pr2 = 0.5, pr3 = 0.5, pl1 = 0, pl2 = 0, pl3 = 0,
+			breath = 0, egBias = 0,
+			// per-operator: ratio, detune (steps), fixed hz, fixed mode, wave, level
 			r1 = 1, r2 = 1, r3 = 1, r4 = 1,
 			d1 = 0, d2 = 0, d3 = 0, d4 = 0,
 			f1 = 100, f2 = 100, f3 = 100, f4 = 100,
 			x1 = 0, x2 = 0, x3 = 0, x4 = 0,
 			w1 = 0, w2 = 0, w3 = 0, w4 = 0,
 			l1 = 1, l2 = 0, l3 = 0, l4 = 0,
-			// per-operator envelope: attack rate, decay1 rate, decay1 level,
-			// decay2 rate, release rate  (rates 0..1, higher = faster)
-			a1 = 0.9, a2 = 0.9, a3 = 0.9, a4 = 0.9,
+			// per-operator envelope: AR, D1R, D1L, D2R, RR (0..1, higher = faster)
+			a1 = 1, a2 = 1, a3 = 1, a4 = 1,
 			b1 = 0.4, b2 = 0.4, b3 = 0.4, b4 = 0.4,
 			c1 = 0.8, c2 = 0.8, c3 = 0.8, c4 = 0.8,
 			e1 = 0.15, e2 = 0.15, e3 = 0.15, e4 = 0.15,
 			g1 = 0.5, g2 = 0.5, g3 = 0.5, g4 = 0.5,
-			// key scaling + velocity sensitivity per operator
+			// level scaling, velocity, AME, rate scaling, EG bias per operator
 			k1 = 0, k2 = 0, k3 = 0, k4 = 0,
 			v1 = 0, v2 = 0, v3 = 0, v4 = 0,
-			rateScale = 0, oversample = 1;
+			m1 = 0, m2 = 0, m3 = 0, m4 = 0,
+			s1 = 0, s2 = 0, s3 = 0, s4 = 0,
+			z1 = 0, z2 = 0, z3 = 0, z4 = 0,
+			grit = 1, oversample = 1;
 
-			var envGate, kill, v, snd, envSum;
+			var envGate, kill, v, snd, envSum, lfoIn;
 
 			envGate = gate.clip(0, 1);
 			kill = EnvGen.kr(Env.asr(0.001, 1, 0.02), killGate, doneAction: 2);
+			lfoIn = In.kr(lfoBus);
 
-			// 4-op FM, envelopes, LFO: one C++ UGen (lib/ugens/DX100Voice).
+			// 4-op FM + envelopes: one C++ UGen (lib/ugens/DX100Voice).
+			// Wheel/breath LFO ranges add to the voice's own PMD/AMD.
 			v = DX100Voice.ar(
-				hz, envGate, vel, legato, t_trig,
+				hz, envGate, vel, legato,
 				algo, feedback, dxFeedback,
 				transpose, port, portMode,
-				lfoRate, lfoWave, lfoDelay, lfoOneshot, lfoUni,
-				pms, ams, alms,
-				pitchEgAmt, pitchEgRate, pitchEgLevel,
+				lfoIn, lfoDelay, lfoUni,
+				(pms + wheelPm).clip(0, 1), (ams + wheelAm).clip(0, 1), alms,
+				pr1, pr2, pr3, pl1, pl2, pl3,
+				breath, egBias,
 				r1, r2, r3, r4, d1, d2, d3, d4,
 				f1, f2, f3, f4, x1, x2, x3, x4,
 				w1, w2, w3, w4, l1, l2, l3, l4,
 				a1, a2, a3, a4, b1, b2, b3, b4,
 				c1, c2, c3, c4, e1, e2, e3, e4,
 				g1, g2, g3, g4, k1, k2, k3, k4,
-				v1, v2, v3, v4, rateScale, oversample
+				v1, v2, v3, v4, m1, m2, m3, m4,
+				s1, s2, s3, s4, z1, z2, z3, z4,
+				grit, oversample
 			);
 			snd = v[0];
 			envSum = v[1];
@@ -88,9 +100,33 @@ Engine_DX100 : CroneEngine {
 				* (Sweep.kr(1 - envGate) > 0.05)
 			);
 			snd = LeakDC.ar(snd);
-			snd = snd * kill * Lag.kr(amp, 0.05) * vel.linlin(0, 1, 0.5, 1.0);
+			// Velocity reaches the sound only through per-op KVS, as on
+			// the hardware; no global velocity->amp here.
+			snd = snd * kill * Lag.kr(amp, 0.05);
 			snd = snd * Lag.kr(voiceScale, 0.03) * Lag.kr(headroom, 0.05);
 			Out.ar(out, Pan2.ar(snd, Lag.kr(pan, 0.08)));
+		}).add;
+
+		// One LFO for the whole engine, as on the hardware. Voices read
+		// it from a control bus and apply their own delay/PMS/AMS. Key
+		// sync restarts it at the positive peak (90 degrees) on key-on.
+		SynthDef(\dx100lfo, {
+			arg bus, lfoRate = 4, lfoWave = 0, lfoOneshot = 0, t_sync = 0;
+			var rate, ph, shot, tri, sn, sq, sh, up, down, raw, wrapTrig;
+			rate = lfoRate.clip(0.0008, 60);
+			ph = Phasor.kr(t_sync, rate * ControlDur.ir, 0, 1, 0.25);
+			// one-shot: a single cycle from the sync point, then park
+			shot = Sweep.kr(t_sync, rate).min(1);
+			ph = Select.kr(lfoOneshot, [ph, shot]);
+			tri = 1 - (((ph + 0.25).wrap(0, 1) * 4) - 2).abs;
+			sn = (ph * 2pi).sin;
+			sq = ((ph < 0.5) * 2) - 1;
+			wrapTrig = (HPZ1.kr(ph) < -0.5) + t_sync + Impulse.kr(0);
+			sh = Latch.kr(WhiteNoise.kr, wrapTrig);
+			up = (ph * 2) - 1;
+			down = 1 - (ph * 2);
+			raw = Select.kr(lfoWave, [tri, sn, sq, sh, up, down]);
+			Out.kr(bus, raw);
 		}).add;
 
 		// ---- post-mix fx, one insert per section ----
@@ -191,9 +227,10 @@ Engine_DX100 : CroneEngine {
 		[
 			\algo, \feedback, \dxFeedback, \amp, \pan, \transpose,
 			\port, \portMode,
-			\lfoRate, \lfoWave, \lfoDelay, \lfoOneshot, \lfoUni,
-			\pms, \ams, \alms,
-			\pitchEgAmt, \pitchEgRate, \pitchEgLevel,
+			\lfoDelay, \lfoUni,
+			\pms, \ams, \alms, \wheelPm, \wheelAm,
+			\pr1, \pr2, \pr3, \pl1, \pl2, \pl3,
+			\breath, \egBias,
 			\r1, \r2, \r3, \r4,
 			\d1, \d2, \d3, \d4,
 			\f1, \f2, \f3, \f4,
@@ -207,61 +244,71 @@ Engine_DX100 : CroneEngine {
 			\g1, \g2, \g3, \g4,
 			\k1, \k2, \k3, \k4,
 			\v1, \v2, \v3, \v4,
-			\rateScale, \oversample
+			\m1, \m2, \m3, \m4,
+			\s1, \s2, \s3, \s4,
+			\z1, \z2, \z3, \z4,
+			\grit, \oversample
 			// NOTE: drive/hiss/bits/srate/glitch/chorus/phaser are NOT
 			// here -- they are post-mix insert controls, not voice buses.
+			// lfoRate/lfoWave/lfoOneshot/lfoSync go to the shared LFO synth.
 		].do({ arg name;
 			ctlBus.put(name, Bus.control(context.server));
 		});
 
 		// defaults (a serviceable electric bass, DX100 preset 1 territory)
 		ctlBus[\algo].setSynchronous(0);
-		ctlBus[\feedback].setSynchronous(0.4);
+		ctlBus[\feedback].setSynchronous(5);
 		ctlBus[\dxFeedback].setSynchronous(0);
 		ctlBus[\amp].setSynchronous(0.4);
 		ctlBus[\pan].setSynchronous(0);
 		ctlBus[\transpose].setSynchronous(0);
 		ctlBus[\port].setSynchronous(0);
 		ctlBus[\portMode].setSynchronous(0);
-		ctlBus[\lfoRate].setSynchronous(4);
-		ctlBus[\lfoWave].setSynchronous(0);
 		ctlBus[\lfoDelay].setSynchronous(0);
-		ctlBus[\lfoOneshot].setSynchronous(0);
 		ctlBus[\lfoUni].setSynchronous(0);
 		ctlBus[\pms].setSynchronous(0);
 		ctlBus[\ams].setSynchronous(0);
 		ctlBus[\alms].setSynchronous(0);
-		ctlBus[\pitchEgAmt].setSynchronous(0);
-		ctlBus[\pitchEgRate].setSynchronous(0.5);
-		ctlBus[\pitchEgLevel].setSynchronous(0);
-		[\r1, \r2, \r3, \r4].do({ arg k, i;
-			ctlBus[k].setSynchronous([1, 1, 1, 1][i]);
-		});
+		ctlBus[\wheelPm].setSynchronous(0);
+		ctlBus[\wheelAm].setSynchronous(0);
+		[\pr1, \pr2, \pr3].do({ arg k; ctlBus[k].setSynchronous(0.5) });
+		[\pl1, \pl2, \pl3].do({ arg k; ctlBus[k].setSynchronous(0) });
+		ctlBus[\breath].setSynchronous(0);
+		ctlBus[\egBias].setSynchronous(0);
+		[\r1, \r2, \r3, \r4].do({ arg k; ctlBus[k].setSynchronous(1) });
 		[\d1, \d2, \d3, \d4].do({ arg k; ctlBus[k].setSynchronous(0) });
 		[\f1, \f2, \f3, \f4].do({ arg k; ctlBus[k].setSynchronous(100) });
 		[\x1, \x2, \x3, \x4].do({ arg k; ctlBus[k].setSynchronous(0) });
 		[\w1, \w2, \w3, \w4].do({ arg k; ctlBus[k].setSynchronous(0) });
 		[\l1, \l2, \l3, \l4].do({ arg k, i;
-			ctlBus[k].setSynchronous([1.0, 0.75, 0.6, 0.5][i]);
+			ctlBus[k].setSynchronous([1.0, 0.82, 0.72, 0.65][i]);
 		});
-		[\a1, \a2, \a3, \a4].do({ arg k; ctlBus[k].setSynchronous(0.95) });
-		[\b1, \b2, \b3, \b4].do({ arg k; ctlBus[k].setSynchronous(0.45) });
+		[\a1, \a2, \a3, \a4].do({ arg k; ctlBus[k].setSynchronous(1.0) });
+		[\b1, \b2, \b3, \b4].do({ arg k; ctlBus[k].setSynchronous(0.4) });
 		[\c1, \c2, \c3, \c4].do({ arg k, i;
-			ctlBus[k].setSynchronous([0.8, 0.5, 0.4, 0.3][i]);
+			ctlBus[k].setSynchronous([0.8, 0.6, 0.5, 0.4][i]);
 		});
-		[\e1, \e2, \e3, \e4].do({ arg k; ctlBus[k].setSynchronous(0.2) });
+		[\e1, \e2, \e3, \e4].do({ arg k; ctlBus[k].setSynchronous(0.25) });
 		[\g1, \g2, \g3, \g4].do({ arg k; ctlBus[k].setSynchronous(0.55) });
 		[\k1, \k2, \k3, \k4].do({ arg k; ctlBus[k].setSynchronous(0) });
 		[\v1, \v2, \v3, \v4].do({ arg k, i;
 			ctlBus[k].setSynchronous([0.3, 0.5, 0.5, 0.5][i]);
 		});
-		ctlBus[\rateScale].setSynchronous(0);
+		[\m1, \m2, \m3, \m4].do({ arg k; ctlBus[k].setSynchronous(0) });
+		[\s1, \s2, \s3, \s4].do({ arg k; ctlBus[k].setSynchronous(0) });
+		[\z1, \z2, \z3, \z4].do({ arg k; ctlBus[k].setSynchronous(0) });
+		ctlBus[\grit].setSynchronous(1);
 		ctlBus[\oversample].setSynchronous(1);
 
 		// voices -> private stereo bus -> gated inserts -> limiter/out.
 		fxBus = Bus.audio(context.server, 2);
+		lfoBus = Bus.control(context.server);
+		// LFO runs ahead of the voices so they read this block's value.
+		lfoGroup = Group.tail(context.xg);
 		gr = ParGroup.tail(context.xg);
 		fxGroup = Group.tail(context.xg);
+		fxLfo = Synth.tail(lfoGroup, \dx100lfo, [\bus, lfoBus.index]);
+		lfoSync = true;
 		fxChar = Synth.tail(fxGroup, \dx100char, [\bus, fxBus.index]);
 		fxChorus = Synth.tail(fxGroup, \dx100chorus, [\bus, fxBus.index]);
 		fxPhaser = Synth.tail(fxGroup, \dx100phaser, [\bus, fxBus.index]);
@@ -329,6 +376,15 @@ Engine_DX100 : CroneEngine {
 			});
 		});
 
+		[\lfoRate, \lfoWave, \lfoOneshot].do({ arg name;
+			this.addCommand(name, "f", { arg msg;
+				fxLfo.set(name, msg[1]);
+			});
+		});
+		this.addCommand("lfoSync", "f", { arg msg;
+			lfoSync = msg[1] > 0.5;
+		});
+
 		this.addCommand("scale_exp", "f", { arg msg;
 			scaleExp = msg[1].clip(0, 1.5);
 			this.rebalance;
@@ -388,6 +444,9 @@ Engine_DX100 : CroneEngine {
 	noteOn { arg id, hz, vel, legato, trig;
 		var syn, args, persist;
 		if(poly == 0, { id = 0 });
+		// Hardware LFO key sync: every key-on restarts the (shared) LFO.
+		// Mono legato passes trig=0 so a slurred note does not.
+		if(lfoSync and: { trig > 0 }, { fxLfo.set(\t_sync, 1) });
 		syn = voices[id];
 		// Reuse whenever this id has a language-side node. Do not test
 		// isPlaying: NodeWatcher is false until /n_go, so a retrigger in
@@ -396,7 +455,7 @@ Engine_DX100 : CroneEngine {
 		if(syn.notNil, {
 			syn.set(
 				\hz, hz, \vel, vel, \legato, legato,
-				\gate, 1, \t_trig, trig, \killGate, 1
+				\gate, 1, \killGate, 1
 			);
 			voiceOrder.remove(id);
 			voiceOrder.add(id);
@@ -408,9 +467,9 @@ Engine_DX100 : CroneEngine {
 		while({ active.size >= voiceCap }, { this.steal });
 		persist = (poly == 0).if({ 1 }, { 0 });
 		args = [
-			\out, fxBus.index,
+			\out, fxBus.index, \lfoBus, lfoBus.index,
 			\hz, hz, \vel, vel, \legato, legato,
-			\gate, 1, \t_trig, trig, \persist, persist, \killGate, 1
+			\gate, 1, \persist, persist, \killGate, 1
 		];
 		ctlBus.keysValuesDo({ arg name, bus;
 			args = args.add(name).add(bus.getSynchronous);
@@ -498,8 +557,10 @@ Engine_DX100 : CroneEngine {
 	free {
 		fxAlive = false;
 		gr.free;
+		lfoGroup.free;
 		fxGroup.free;
 		fxBus.free;
+		lfoBus.free;
 		ctlBus.do({ arg b; b.free });
 	}
 }

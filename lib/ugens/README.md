@@ -51,9 +51,28 @@ block — hoist it above the `for (n...)` loop. Key scaling and envelope
 segment times are deliberately resolved once per block: they are scaling
 coefficients, not audio, so a 64-sample staircase on them is inaudible.
 
-Envelope segments are an exponential recursion (`ep *= epMul`), set up in
-`envStartSeg` which runs only on segment boundaries. Do not move `expf`
-back into `envTick`.
+Envelopes run in the dB domain: the state is an attenuation, decays add a
+per-block constant, the attack multiplies by a per-block coefficient, and
+one `exp2f_fast` per op per sample turns the total attenuation (envelope +
+level + scaling + AM) into an amplitude. The rate -> time tables
+(`decayTime`, `attackTime`, `releaseTime`) use `exp2f` but only at block
+rate.
+
+## hardware model
+
+- level, D1L, key scaling, velocity, EG bias, AM: attenuations in dB.
+  Level uses the 7-bit TL table (0.75 dB/step, wider below OL 20).
+- modulation index: `kModIndex = 8 pi` for a level-99 operator.
+- feedback 0-7: `4 pi * 2^(fb-7)` on the mean of the last two op4 samples.
+- rates: 96 dB decay time halves every two rate steps, ~0.7 ms at 31;
+  D1R/D2R 0 hold. RR 0 is ~23 s. Rate scaling (KRS 0-3) shortens times
+  by `2^(-octaves above C1 * 2^(KRS-3))`.
+- key-on resets all operator phases and the feedback history.
+- the LFO lives in `Engine_DX100` (one `\dx100lfo` synth on a control
+  bus); this UGen only applies delay, PMS (±800 cents at max) and AMS
+  (96 dB at max) to the value it reads.
+- `grit` = 10-bit sine phase without interpolation + 0.09375 dB envelope
+  steps.
 
 ## the shadowing trap
 

@@ -1,17 +1,25 @@
 // DX100Voice — one 4-op FM voice as a single UGen.
-// Waves, algorithms, feedback, envelopes, LFO in C++ so unused
-// branches are not computed (SC Select cannot skip).
+// Waves, algorithms, feedback, envelopes in C++ so unused branches are
+// not computed (SC Select cannot skip).
+//
+// Voice model follows the Yamaha OPP (YM2164) family as used in the
+// DX100 / DX21 / DX27 / TX81Z:
+//   - operator level, D1L, key scaling, velocity, AM and EG bias are all
+//     attenuations in dB; the envelope runs in the dB domain (decays are
+//     linear in dB, attack is an exponential approach to 0 dB), and the
+//     dB -> amplitude conversion happens once per op per sample
+//   - a level-99 modulator swings the carrier phase by 8 pi radians
+//   - feedback averages the last two op4 samples, FB 7 = 4 pi
+//   - operator phases reset on key-on
+//   - the LFO is shared (one per engine, on a control bus); this UGen
+//     only applies delay, PMS and AMS to the value it is handed
 //
 // Performance note: the inner loop must stay free of libm transcendentals.
 // sinf/powf/expf on the norns CPU (Cortex-A53, no fast transcendental unit)
-// cost 50-150 cycles each; the first version of this UGen ran ~28 of them
-// per sample per voice, which is why it was slower than the SC graph it
-// replaced (SinOsc is a table lookup, and the .kr parts of that graph ran
-// once per 64 samples). So here:
+// cost 50-150 cycles each, so:
 //   - sin comes from a 4096-entry linear-interpolated table  (-123 dB)
 //   - 2^x comes from exponent-bit assembly + quintic mantissa fit
 //     (max 0.0004 cents error)
-//   - envelope segments run as a one-multiply exponential recursion
 //   - everything derived only from scalar-rate IN0 is hoisted to block rate
 
 #include "SC_PlugIn.h"
@@ -22,16 +30,22 @@ static InterfaceTable* ft;
 
 static const float kPi = 3.14159265358979323846f;
 static const float kTwoPi = 6.28318530717958647692f;
-static const float kModIndex = 7.0f;
+// Phase swing of a full-level modulator. OPM-family arithmetic: 14-bit
+// operator output shifted right once, added to a 10-bit phase, so a
+// level-99 op moves the carrier by +-4 cycles.
+static const float kModIndex = 8.f * kPi;
+// Attenuation treated as silence. Hardware envelope range is 96 dB.
+static const float kSilentDb = 96.f;
+// dB -> 2^ exponent: 10^(-x/20) == 2^(-x/6.0206)
+static const float kDbToExp2 = -1.f / 6.02059991f;
+// Hardware envelope step (10 bits over 96 dB), used by the grit option.
+static const float kEnvStepDb = 0.09375f;
 
 // ---- sine table -------------------------------------------------------
 #define kSineBits 12
 #define kSineSize (1 << kSineBits)
 #define kSineMask (kSineSize - 1)
 
-// Filled by a static initializer, not by PluginLoad: the table must be
-// valid for any translation unit that pulls this in (offline test harness
-// included), and it must never depend on load-order.
 struct SineTable {
 	float v[kSineSize + 1];
 	SineTable() {
@@ -54,12 +68,16 @@ static inline float sinTab(float phase) {
 	return a + (gSine[i + 1] - a) * frac;
 }
 
-// sin of a radian argument, for phase-modulated lookups.
+// Hardware-style lookup: 10-bit phase index, no interpolation.
+static inline float sinTabGrit(float phase) {
+	float p = phase - floorf(phase);
+	int i = ((int)(p * 1024.f)) & 1023;
+	return gSine[i << 2];
+}
+
 static inline float sinRad(float x) { return sinTab(x * (1.f / kTwoPi)); }
 
 // ---- fast 2^x ---------------------------------------------------------
-// Assemble the exponent by hand, fit the mantissa on [0,1) with a quintic.
-// Max 2.4e-7 relative == 0.0004 cents, far below audibility for pitch.
 static inline float exp2f_fast(float x) {
 	if (x > 126.f) x = 126.f;
 	if (x < -126.f) x = -126.f;
@@ -82,7 +100,6 @@ static inline float expf_fast(float x) {
 }
 
 // ---- fast log2 --------------------------------------------------------
-// Pull the exponent, fit log2 of the mantissa on [1,2). Max 5.7e-6 abs.
 static inline float log2f_fast(float x) {
 	if (x <= 1e-20f) return -66.f;
 	union { float f; uint32_t u; } v;
@@ -105,38 +122,39 @@ enum {
 	i_gate,
 	i_vel,
 	i_legato,
-	i_ttrig,
 	i_algo,
-	i_feedback,
+	i_feedback,     // 0..7, hardware FB level
 	i_dxFeedback,
 	i_transpose,
 	i_port,
 	i_portMode,
-	i_lfoRate,
-	i_lfoWave,
+	i_lfoIn,        // shared LFO, bipolar -1..1
 	i_lfoDelay,
-	i_lfoOneshot,
 	i_lfoUni,
 	i_pms,
 	i_ams,
 	i_alms,
-	i_pegAmt,
-	i_pegRate,
-	i_pegLevel,
-	i_r1, i_r2, i_r3, i_r4,
-	i_d1, i_d2, i_d3, i_d4,
-	i_f1, i_f2, i_f3, i_f4,
-	i_x1, i_x2, i_x3, i_x4,
-	i_w1, i_w2, i_w3, i_w4,
-	i_l1, i_l2, i_l3, i_l4,
-	i_a1, i_a2, i_a3, i_a4,
-	i_b1, i_b2, i_b3, i_b4,
-	i_c1, i_c2, i_c3, i_c4,
-	i_e1, i_e2, i_e3, i_e4,
-	i_g1, i_g2, i_g3, i_g4,
-	i_k1, i_k2, i_k3, i_k4,
-	i_v1, i_v2, i_v3, i_v4,
-	i_rateScale,
+	i_pr1, i_pr2, i_pr3,   // pitch EG rates 0..1
+	i_pl1, i_pl2, i_pl3,   // pitch EG levels -1..1 (x48 semitones)
+	i_breath,       // 0..1
+	i_egBias,       // breath EG bias range 0..1
+	i_r1, i_r2, i_r3, i_r4,   // ratio
+	i_d1, i_d2, i_d3, i_d4,   // detune steps -3..3
+	i_f1, i_f2, i_f3, i_f4,   // fixed hz
+	i_x1, i_x2, i_x3, i_x4,   // fixed mode
+	i_w1, i_w2, i_w3, i_w4,   // wave
+	i_l1, i_l2, i_l3, i_l4,   // output level 0..1 (OL/99)
+	i_a1, i_a2, i_a3, i_a4,   // AR 0..1
+	i_b1, i_b2, i_b3, i_b4,   // D1R
+	i_c1, i_c2, i_c3, i_c4,   // D1L
+	i_e1, i_e2, i_e3, i_e4,   // D2R
+	i_g1, i_g2, i_g3, i_g4,   // RR
+	i_k1, i_k2, i_k3, i_k4,   // keyboard level scaling 0..1
+	i_v1, i_v2, i_v3, i_v4,   // key velocity sensitivity 0..1
+	i_m1, i_m2, i_m3, i_m4,   // AME on/off
+	i_s1, i_s2, i_s3, i_s4,   // keyboard rate scaling 0..3
+	i_z1, i_z2, i_z3, i_z4,   // EG bias sensitivity 0..1
+	i_grit,
 	i_oversample,
 	i_numInputs
 };
@@ -145,44 +163,26 @@ enum { o_snd = 0, o_env, o_numOutputs };
 
 enum EnvStage { kIdle, kAtk, kD1, kD2, kSus, kRel };
 
-// A segment runs as an exponential recursion: `ep` decays from 1 toward 0
-// by one multiply per sample, and level maps off it. This replaces the two
-// expf calls that curvePos() used to make per op per sample.
-//   linear   (curve ~ 0): level = start + (target-start) * pos
-//   exponential        : level = target + (start-target) * ep
+// Envelope state is an attenuation in dB: 0 = full level, 96 = silent.
 struct OpEnv {
 	int stage;
-	float level;
-	float start;
-	float target;
-	float pos;      // 0..1 linear progress, drives segment-done test
-	float posInc;   // per-sample increment of pos
-	float ep;       // exponential state, 1 -> ~0 across the segment
-	float epMul;    // per-sample multiplier for ep
-	float epScale;  // 1/(1-epEnd), normalizes ep so the segment lands exactly
-	float epEnd;    // ep value at segment end
-	int isExp;
+	float att;
 };
+
+enum PegStage { kPegRest, kPegL1, kPegL2, kPegL3 };
 
 struct DX100Voice : public Unit {
 	float sr;
 	float recSr;
 	float opPhase[4];
-	float fbLast;
+	float fbLast, fbPrev;
 	float freqLag;
 	float prevGate;
-	float prevTrig;
-	float lfoPhase;
-	float lfoSh;
 	float lfoDelayPos;
-	float pegPos;
-	float pegLevel;
-	uint32_t rng;
+	int pegStage;
+	int pegInit;
+	float pegLevel;     // semitones
 	OpEnv env[4];
-	int oneshotDone;
-	// Decimation filter state: two cascaded biquads (4th-order Butterworth)
-	// run at the oversampled rate, so folded sidebands are attenuated
-	// before we throw samples away. Only used when oversampling is on.
 	float dz[2][2];
 	int lastOs;
 };
@@ -195,8 +195,6 @@ static inline float biquad(float x, const float* c, float* z) {
 	return y;
 }
 
-// Butterworth lowpass at `fc` relative to `sr`, as two cascaded sections.
-// Q values for a 4th-order Butterworth: 0.54119610, 1.30656296.
 static void makeLowpass(float fc, float sr, float coef[2][5]) {
 	static const float qs[2] = { 0.54119610f, 1.30656296f };
 	float w0 = 2.f * kPi * fc / sr;
@@ -214,19 +212,6 @@ static void makeLowpass(float fc, float sr, float coef[2][5]) {
 	}
 }
 
-static float linexp(float x, float x0, float x1, float y0, float y1) {
-	if (x <= x0) return y0;
-	if (x >= x1) return y1;
-	float t = (x - x0) / (x1 - x0);
-	return y0 * powf(y1 / y0, t);
-}
-
-static float linlin(float x, float x0, float x1, float y0, float y1) {
-	if (x <= x0) return y0;
-	if (x >= x1) return y1;
-	return y0 + (x - x0) * (y1 - y0) / (x1 - x0);
-}
-
 static float clip01(float x) {
 	if (x < 0.f) return 0.f;
 	if (x > 1.f) return 1.f;
@@ -239,71 +224,57 @@ static float wrap01(float p) {
 	return p;
 }
 
-static float rateTime(float rate, float lo, float hi) {
-	rate = clip01(rate);
-	return linexp(rate, 0.f, 1.f, hi, lo);
+// ---- hardware tables ----------------------------------------------------
+
+// Operator output level 0..99 -> attenuation in dB. TL is 7 bits at
+// 0.75 dB/step; OL >= 20 maps as OL+28, below that the steps widen.
+static const uint8_t kOlTab[20] = {
+	0, 5, 9, 13, 17, 20, 23, 25, 27, 29,
+	31, 33, 35, 37, 39, 41, 42, 43, 45, 46
+};
+static float levelDb(float l01) {
+	int ol = (int)(clip01(l01) * 99.f + 0.5f);
+	int tl = ol < 20 ? kOlTab[ol] : ol + 28;
+	if (tl > 127) tl = 127;
+	return (float)(127 - tl) * 0.75f;
 }
 
-// Called on segment boundaries only (a few times per note), so the libm
-// calls here are fine — they are not in the per-sample path.
-static void envStartSeg(OpEnv* e, float start, float target, float dur,
-		float curve, float recSr) {
-	e->start = start;
-	e->target = target;
-	e->level = start;
-	e->pos = 0.f;
-	if (dur < 1e-6f) dur = 1e-6f;
-	e->posInc = recSr / dur;
-	if (fabsf(curve) < 0.001f) {
-		e->isExp = 0;
-		e->ep = 1.f;
-		e->epMul = 1.f;
-		e->epScale = 1.f;
-		e->epEnd = 0.f;
-	} else {
-		// SC's Env curve shape: (1 - exp(pos*curve)) / (1 - exp(curve)).
-		// Equivalent to an exponential from start to target, so run
-		// exp(pos*curve) as a recursion and normalize the endpoints.
-		e->isExp = 1;
-		e->ep = 1.f;
-		e->epMul = expf(curve * e->posInc);
-		e->epEnd = expf(curve);
-		float denom = 1.f - e->epEnd;
-		e->epScale = (fabsf(denom) < 1e-8f) ? 0.f : (1.f / denom);
-	}
+// D1L 0..1 -> dB. Hardware: 16 steps of 3 dB, 0 = off.
+static float d1lDb(float c01) {
+	if (c01 <= 0.f) return kSilentDb;
+	return (1.f - clip01(c01)) * 45.f;
 }
 
-static inline float envTick(OpEnv* e) {
-	if (e->stage == kIdle) {
-		e->level = 0.f;
-		return 0.f;
-	}
-	if (e->stage == kSus) {
-		return e->level;
-	}
-	e->pos += e->posInc;
-	if (e->pos >= 1.f) {
-		e->pos = 1.f;
-		e->level = e->target;
-		return e->level;
-	}
-	if (e->isExp) {
-		e->ep *= e->epMul;
-		// shape = (1 - ep) / (1 - epEnd), 0 at segment start, 1 at end
-		float shape = (1.f - e->ep) * e->epScale;
-		e->level = e->start + (e->target - e->start) * shape;
-	} else {
-		e->level = e->start + (e->target - e->start) * e->pos;
-	}
-	return e->level;
+// 96 dB decay time for a 0..31 rate (r01 * 31). OPM rates: the time
+// halves every 2 rate steps, ~0.7 ms at 31. Rate 0 = hold (returns 0).
+static float decayTime(float r01) {
+	if (r01 <= 0.f) return 0.f;
+	float r = clip01(r01) * 31.f;
+	return 0.0007f * exp2f((31.f - r) * 0.5f);
 }
 
-static inline int envSegDone(const OpEnv* e) { return e->pos >= 1.f; }
+// Attack: time from 96 dB to ~0. 31 = instantaneous, 0 ~ 14 s (hardware
+// AR 0 never rises; we keep it finite so a patch cannot go silent).
+static float attackTime(float r01) {
+	float r = clip01(r01) * 31.f;
+	return 0.0003f * exp2f((31.f - r) * 0.5f);
+}
+
+// Release 0..15: internal rate 4*RR+2, 0 = slow decay (~23 s), 15 fastest.
+static float releaseTime(float r01) {
+	float rr = clip01(r01) * 15.f;
+	return 0.0007f * exp2f(15.f - rr);
+}
+
+// Pitch EG rate 0..1 -> time for a full 96-semitone sweep.
+static float pegTime(float r01) {
+	return 0.002f * exp2f((1.f - clip01(r01)) * 12.f);
+}
 
 // phase in turns; pm in radians.
-static inline float opWave(int wave, float phase, float pm) {
+static inline float opWave(int wave, float phase, float pm, int grit) {
 	float pmTurns = pm * (1.f / kTwoPi);
-	float s = sinTab(phase + pmTurns);
+	float s = grit ? sinTabGrit(phase + pmTurns) : sinTab(phase + pmTurns);
 	switch (wave) {
 	case 0: return s;
 	case 1: return s > 0.f ? s : 0.f;
@@ -331,66 +302,43 @@ static inline float opWave(int wave, float phase, float pm) {
 	}
 }
 
-static inline float lfoRaw(int wave, float p, float sh) {
-	switch (wave) {
-	case 0: // tri
-		if (p < 0.25f) return p * 4.f;
-		if (p < 0.75f) return 2.f - p * 4.f;
-		return p * 4.f - 4.f;
-	case 1: return sinTab(p);
-	case 2: return p < 0.5f ? 1.f : -1.f;
-	case 3: return sh;
-	case 4: return p * 2.f - 1.f;
-	case 5: return 1.f - p * 2.f;
-	default: return 0.f;
-	}
-}
-
-// Routing for one algorithm, as coefficients rather than a switch run
-// four times per sample. m[i][j] = how much op j modulates op i.
-// car[i] = op i is a carrier. Resolved once per block (or per sample only
-// when ALMS is sweeping the algorithm).
+// Routing for one algorithm. m[i][j] = how much op j modulates op i.
 struct Routing {
-	float mod3_4;              // op4 -> op3
-	float mod2_3, mod2_4;      // -> op2
-	float mod1_2, mod1_3, mod1_4;  // -> op1
+	float mod3_4;
+	float mod2_3, mod2_4;
+	float mod1_2, mod1_3, mod1_4;
 	float car1, car2, car3, car4;
-	float norm;                // 1/sqrt(number of carriers)
 };
 
-static const float kInvSqrt[5] = {
-	1.f, 1.f, 0.70710678f, 0.57735027f, 0.5f
-};
-
+// 0-7: the Yamaha 4-op set (DX100/DX21/DX27/TX81Z panel order).
+// 8-15: extra wirings. Carriers sum raw, as on the chip.
 static void makeRouting(int algo, Routing* r) {
 	const float m = kModIndex;
 	float m34 = 0, m23 = 0, m24 = 0, m12 = 0, m13 = 0, m14 = 0;
 	float c1 = 1, c2 = 0, c3 = 0, c4 = 0;
-	int n = 1;
 	switch (algo) {
-	case 0:  m34 = m; m23 = m; m12 = m; c1 = 1; n = 1; break;
-	case 1:  m23 = m; m24 = m; m12 = m; c1 = 1; n = 1; break;
-	case 2:  m23 = m; m12 = m; m14 = m; c1 = 1; n = 1; break;
-	case 3:  m34 = m; m13 = m; m12 = m; c1 = 1; n = 1; break;
-	case 4:  m34 = m; m24 = m; m13 = m; c1 = 1; c2 = 1; n = 2; break;
-	case 5:  m34 = m; m24 = m; m14 = m; c1 = 1; c2 = 1; c3 = 1; n = 3; break;
-	case 6:  m34 = m; c1 = 1; c2 = 1; c3 = 1; n = 3; break;
-	case 7:  c1 = 1; c2 = 1; c3 = 1; c4 = 1; n = 4; break;
-	case 8:  m34 = m; m12 = m; c1 = 1; c3 = 1; n = 2; break;
-	case 9:  m34 = m; m23 = m; c1 = 1; c2 = 1; n = 2; break;
-	case 10: m14 = m; m13 = m; m12 = m; c1 = 1; n = 1; break;
-	case 11: m34 = m; m24 = m; c1 = 1; c2 = 1; c3 = 1; n = 3; break;
-	case 12: m34 = m; m24 = m; m13 = m; m12 = m; c1 = 1; n = 1; break;
-	case 13: m34 = m; m23 = m; m12 = m; m14 = m; c1 = 1; n = 1; break;
-	case 14: m34 = m; m23 = m; m12 = m; m13 = m; c1 = 1; n = 1; break;
-	case 15: m34 = m; m23 = m; m14 = m; c1 = 1; c2 = 1; n = 2; break;
+	case 0:  m34 = m; m23 = m; m12 = m; c1 = 1; break;
+	case 1:  m23 = m; m24 = m; m12 = m; c1 = 1; break;
+	case 2:  m23 = m; m12 = m; m14 = m; c1 = 1; break;
+	case 3:  m34 = m; m13 = m; m12 = m; c1 = 1; break;
+	case 4:  m34 = m; m12 = m; c1 = 1; c3 = 1; break;        // two pairs
+	case 5:  m34 = m; m24 = m; m14 = m; c1 = 1; c2 = 1; c3 = 1; break;
+	case 6:  m34 = m; c1 = 1; c2 = 1; c3 = 1; break;
+	case 7:  c1 = 1; c2 = 1; c3 = 1; c4 = 1; break;
+	case 8:  m34 = m; m24 = m; m13 = m; c1 = 1; c2 = 1; break; // Y split
+	case 9:  m34 = m; m23 = m; c1 = 1; c2 = 1; break;
+	case 10: m14 = m; m13 = m; m12 = m; c1 = 1; break;
+	case 11: m34 = m; m24 = m; c1 = 1; c2 = 1; c3 = 1; break;
+	case 12: m34 = m; m24 = m; m13 = m; m12 = m; c1 = 1; break;
+	case 13: m34 = m; m23 = m; m12 = m; m14 = m; c1 = 1; break;
+	case 14: m34 = m; m23 = m; m12 = m; m13 = m; c1 = 1; break;
+	case 15: m34 = m; m23 = m; m14 = m; c1 = 1; c2 = 1; break;
 	default: break;
 	}
 	r->mod3_4 = m34;
 	r->mod2_3 = m23; r->mod2_4 = m24;
 	r->mod1_2 = m12; r->mod1_3 = m13; r->mod1_4 = m14;
 	r->car1 = c1; r->car2 = c2; r->car3 = c3; r->car4 = c4;
-	r->norm = kInvSqrt[n < 0 ? 0 : (n > 4 ? 4 : n)];
 }
 
 static void DX100Voice_next(DX100Voice* unit, int inNumSamples);
@@ -401,67 +349,54 @@ static void DX100Voice_Ctor(DX100Voice* unit) {
 	for (int i = 0; i < 4; ++i) {
 		unit->opPhase[i] = 0.f;
 		unit->env[i].stage = kIdle;
-		unit->env[i].level = 0.f;
-		unit->env[i].pos = 1.f;
-		unit->env[i].posInc = 1.f;
-		unit->env[i].ep = 0.f;
-		unit->env[i].epMul = 1.f;
-		unit->env[i].epScale = 1.f;
-		unit->env[i].epEnd = 0.f;
-		unit->env[i].isExp = 0;
+		unit->env[i].att = kSilentDb;
 	}
 	unit->fbLast = 0.f;
+	unit->fbPrev = 0.f;
 	unit->freqLag = IN0(i_hz);
 	unit->prevGate = 0.f;
-	unit->prevTrig = 0.f;
-	unit->lfoPhase = 0.f;
-	unit->lfoSh = 0.f;
 	unit->lfoDelayPos = 0.f;
-	unit->pegPos = 1.f;
+	unit->pegStage = kPegRest;
+	unit->pegInit = 0;
 	unit->pegLevel = 0.f;
-	unit->rng = 1u;
-	unit->oneshotDone = 0;
 	for (int s = 0; s < 2; ++s) unit->dz[s][0] = unit->dz[s][1] = 0.f;
 	unit->lastOs = 0;
 	SETCALC(DX100Voice_next);
-	// Do not calc in Ctor: IN0 can be garbage before wires connect,
-	// which left envelopes idle and every operator silent.
+	// Do not calc in Ctor: IN0 can be garbage before wires connect.
 }
 
 static void DX100Voice_next(DX100Voice* unit, int inNumSamples) {
 	float* out = OUT(o_snd);
 	float* envOut = OUT(o_env);
 	const float recSr = unit->recSr;
+	const float sr = unit->sr;
 
 	float hzIn = IN0(i_hz);
 	float gate = IN0(i_gate);
 	float vel = clip01(IN0(i_vel));
 	float legato = clip01(IN0(i_legato));
-	float ttrig = IN0(i_ttrig);
 	int algo = (int)(IN0(i_algo) + 0.5f);
 	if (algo < 0) algo = 0;
 	if (algo > 15) algo = 15;
-	float feedback = clip01(IN0(i_feedback));
+	float feedback = IN0(i_feedback);
+	if (feedback < 0.f) feedback = 0.f;
+	if (feedback > 7.f) feedback = 7.f;
 	float dxFeedback = clip01(IN0(i_dxFeedback));
 	float transpose = IN0(i_transpose);
 	float port = IN0(i_port);
 	float portMode = IN0(i_portMode);
-	float lfoRate = IN0(i_lfoRate);
-	if (lfoRate < 0.02f) lfoRate = 0.02f;
-	if (lfoRate > 60.f) lfoRate = 60.f;
-	int lfoWave = (int)(IN0(i_lfoWave) + 0.5f);
-	if (lfoWave < 0) lfoWave = 0;
-	if (lfoWave > 5) lfoWave = 5;
+	float lfoRaw = IN0(i_lfoIn);
+	if (lfoRaw < -1.f) lfoRaw = -1.f;
+	if (lfoRaw > 1.f) lfoRaw = 1.f;
 	float lfoDelay = clip01(IN0(i_lfoDelay));
-	int lfoOneshot = IN0(i_lfoOneshot) >= 0.5f;
 	int lfoUni = IN0(i_lfoUni) >= 0.5f;
-	float pms = IN0(i_pms);
-	float ams = IN0(i_ams);
+	float pms = clip01(IN0(i_pms));
+	float ams = clip01(IN0(i_ams));
 	float alms = IN0(i_alms);
-	float pegAmt = IN0(i_pegAmt);
-	float pegRate = clip01(IN0(i_pegRate));
-	float pegLevP = IN0(i_pegLevel);
-	float rateScale = IN0(i_rateScale);
+	float pegR[3] = { IN0(i_pr1), IN0(i_pr2), IN0(i_pr3) };
+	float pegL[3] = { IN0(i_pl1), IN0(i_pl2), IN0(i_pl3) };
+	float breath = clip01(IN0(i_breath));
+	float egBias = clip01(IN0(i_egBias));
 
 	float ratio[4] = { IN0(i_r1), IN0(i_r2), IN0(i_r3), IN0(i_r4) };
 	float det[4] = { IN0(i_d1), IN0(i_d2), IN0(i_d3), IN0(i_d4) };
@@ -480,64 +415,65 @@ static void DX100Voice_next(DX100Voice* unit, int inNumSamples) {
 	float d1L[4] = { IN0(i_c1), IN0(i_c2), IN0(i_c3), IN0(i_c4) };
 	float d2R[4] = { IN0(i_e1), IN0(i_e2), IN0(i_e3), IN0(i_e4) };
 	float relR[4] = { IN0(i_g1), IN0(i_g2), IN0(i_g3), IN0(i_g4) };
-	float ks[4] = { IN0(i_k1), IN0(i_k2), IN0(i_k3), IN0(i_k4) };
-	float vs[4] = { IN0(i_v1), IN0(i_v2), IN0(i_v3), IN0(i_v4) };
+	float kls[4] = { IN0(i_k1), IN0(i_k2), IN0(i_k3), IN0(i_k4) };
+	float kvs[4] = { IN0(i_v1), IN0(i_v2), IN0(i_v3), IN0(i_v4) };
+	int ame[4] = {
+		IN0(i_m1) >= 0.5f, IN0(i_m2) >= 0.5f,
+		IN0(i_m3) >= 0.5f, IN0(i_m4) >= 0.5f
+	};
+	float krs[4] = { IN0(i_s1), IN0(i_s2), IN0(i_s3), IN0(i_s4) };
+	float ebs[4] = { IN0(i_z1), IN0(i_z2), IN0(i_z3), IN0(i_z4) };
+	const int grit = IN0(i_grit) >= 0.5f;
 	for (int i = 0; i < 4; ++i) {
 		if (wave[i] < 0) wave[i] = 0;
 		if (wave[i] > 7) wave[i] = 7;
-		level[i] = level[i] < 0.f ? 0.f : level[i];
-		d1L[i] = clip01(d1L[i]);
+		if (krs[i] < 0.f) krs[i] = 0.f;
+		if (krs[i] > 3.f) krs[i] = 3.f;
 	}
 
 	int gateOn = gate >= 0.5f;
-	int trigEdge = ttrig > 0.f && unit->prevTrig <= 0.f;
-	unit->prevTrig = ttrig;
 
 	float slide = (portMode >= 0.5f) ? port : port * legato;
 	if (slide < 0.f) slide = 0.f;
 	if (slide > 5.f) slide = 5.f;
 
-	float delayTime = linlin(lfoDelay, 0.f, 1.f, 0.001f, 4.f);
-	float pegDur = linexp(pegRate, 0.f, 1.f, 4.f, 0.004f);
-
 	// ---- block-rate hoists ---------------------------------------------
-	// All of these depend only on scalar-rate inputs, so they are constant
-	// across the block. Computing them per sample was the bulk of the cost.
 	const float transposeMul = exp2f_fast(transpose * (1.f / 12.f));
 	const float portCoef = (slide <= 0.0005f)
 		? 1.f : (1.f - expf_fast(-recSr / slide));
-	const float recDelayTime = 1.f / delayTime;
-	const float recPegDur = 1.f / pegDur;
-	const float lfoInc = lfoRate * recSr;
-	const float pmsScale = pms * 0.0833f;
-	const float fbGain = feedback * 6.f;
+	// LFO delay: hold for D, then fade in over D. D = 10.7 s at max.
+	const float delayD = 10.7f * lfoDelay * lfoDelay;
+	const float recDelayD = delayD > 1e-4f ? 1.f / delayD : 0.f;
+	// PMS 7 + PMD 99 = +-800 cents. Curve so the low range stays usable.
+	const float pmsSemis = 8.f * pms * pms * pms;
+	// AMS 3 + AMD 99 = 96 dB.
+	const float amsDb = kSilentDb * ams * ams;
+	// FB 7 = 4 pi on the two-sample average; halves per step.
+	const float fbGain = feedback > 0.f
+		? 4.f * kPi * exp2f_fast(feedback - 7.f) : 0.f;
 	const int dxOn = dxFeedback > 1e-6f;
 	const float dxPiAmt = dxFeedback * kPi;
+	// Detune: +-3 steps = +-2.6 cents (manual).
 	float detMul[4];
 	for (int i = 0; i < 4; ++i) {
-		detMul[i] = exp2f_fast(det[i] * (1.f / 1200.f));
-	}
-	// Which ops can produce sound at all this block. Skips both the
-	// oscillator and its wave switch when an op is muted.
-	int opLive[4];
-	for (int i = 0; i < 4; ++i) {
-		opLive[i] = level[i] > 1e-5f;
+		float d = det[i];
+		if (d < -3.f) d = -3.f;
+		if (d > 3.f) d = 3.f;
+		detMul[i] = exp2f_fast(d * (0.8667f / 1200.f));
 	}
 
-	// Key scaling / rate scaling follow the note's pitch, which only moves
-	// on portamento, PEG or LFO pitch mod. Resolve once per block from the
-	// current lagged frequency: these are scaling coefficients, not audio,
-	// and a 64-sample staircase on them is inaudible.
+	// Pitch-dependent scaling, from the current (lagged) frequency.
 	float scaleFreq = unit->freqLag * transposeMul;
 	if (scaleFreq < 8.f) scaleFreq = 8.f;
 	if (scaleFreq > 12000.f) scaleFreq = 12000.f;
-	const float keyTrack = log2f_fast(scaleFreq > 13.0815f
-		? scaleFreq * (1.f / 261.63f) : 0.05f);
-	const float scl = exp2f_fast(keyTrack * (-rateScale) * 0.5f);
-	// Oversampling factor: 1 (off), 2 or 4. FM folds its own sidebands, so
-	// running the oscillator core faster and lowpassing before decimation
-	// is the only way to reduce it. Cost scales with the factor, so this
-	// is a user choice, not a default.
+	// Octaves above C1 (32.7 Hz): the chip's key code runs 0..31 in
+	// quarter-octave steps from about there.
+	float octC1 = log2f_fast(scaleFreq * (1.f / 32.7032f));
+	if (octC1 < 0.f) octC1 = 0.f;
+	// Level scaling: nothing below C2, kls * 8 dB per octave above.
+	float octC2 = octC1 - 1.f;
+	if (octC2 < 0.f) octC2 = 0.f;
+
 	int os = (int)(IN0(i_oversample) + 0.5f);
 	if (os < 1) os = 1;
 	if (os > 4) os = 4;
@@ -545,53 +481,64 @@ static void DX100Voice_next(DX100Voice* unit, int inNumSamples) {
 	const float recSrOs = recSr / (float)os;
 	float lpCoef[2][5];
 	if (os > 1) {
-		// Cut just under base-rate Nyquist, at the oversampled rate.
-		makeLowpass(unit->sr * 0.45f, unit->sr * (float)os, lpCoef);
+		makeLowpass(sr * 0.45f, sr * (float)os, lpCoef);
 	}
 	if (os != unit->lastOs) {
-		// Factor changed: stale filter state belongs to a different rate.
 		for (int s = 0; s < 2; ++s) unit->dz[s][0] = unit->dz[s][1] = 0.f;
 		unit->lastOs = os;
 	}
-	// Velocity and key scaling are both per-op constants for the block;
-	// fold them into one multiplier so the sample loop does a single
-	// multiply against the envelope level.
-	float envScale[4];
+
+	// Per-op static attenuation (dB): output level, level scaling,
+	// velocity, EG bias. Constant across the block.
+	float staticAtt[4];
+	int opLive[4];
 	for (int i = 0; i < 4; ++i) {
-		envScale[i] = (1.f - vs[i] * (1.f - vel))
-			* exp2f_fast(keyTrack * (-ks[i]));
-	}
-	// Envelope segment times, per op, resolved once per block.
-	float atkT[4], d1T[4], d2T[4], relT[4];
-	for (int i = 0; i < 4; ++i) {
-		atkT[i] = rateTime(atkR[i], 0.0008f, 6.f) * scl;
-		d1T[i] = rateTime(d1R[i], 0.004f, 12.f) * scl;
-		d2T[i] = rateTime(d2R[i], 0.01f, 40.f) * scl;
-		relT[i] = rateTime(relR[i], 0.004f, 10.f) * scl;
+		float a = levelDb(level[i]);
+		a += clip01(kls[i]) * 8.f * octC2;
+		a += clip01(kvs[i]) * 48.f * (1.f - vel);
+		a += clip01(ebs[i]) * egBias * 48.f * (1.f - breath);
+		staticAtt[i] = a;
+		opLive[i] = a < 90.f;
 	}
 
-	// Algorithm routing. Constant for the block unless ALMS sweeps it.
+	// Envelope increments, per op, resolved once per block. Rate scaling:
+	// the key code adds to the internal rate, KRS selecting how much
+	// (>> 3-KRS). Times shrink by 2^(-oct * 2^(KRS-3)).
+	float atkCoef[4], d1Inc[4], d2Inc[4], relInc[4], d1lAtt[4];
+	for (int i = 0; i < 4; ++i) {
+		float k = (float)((int)(krs[i] + 0.5f));
+		float tmul = exp2f_fast(-octC1 * exp2f_fast(k - 3.f));
+		float ta = attackTime(atkR[i]) * tmul;
+		// exponential approach; T is the time from 96 dB to 0.75 dB
+		float tau = ta * (1.f / 4.852f);
+		atkCoef[i] = ta < 1e-4f ? 1.f : (1.f - expf_fast(-recSr / tau));
+		float t1 = decayTime(d1R[i]);
+		d1Inc[i] = t1 > 0.f ? kSilentDb * recSr / (t1 * tmul) : 0.f;
+		float t2 = decayTime(d2R[i]);
+		d2Inc[i] = t2 > 0.f ? kSilentDb * recSr / (t2 * tmul) : 0.f;
+		float tr = releaseTime(relR[i]) * tmul;
+		relInc[i] = kSilentDb * recSr / tr;
+		d1lAtt[i] = d1lDb(d1L[i]);
+	}
+
+	// Pitch EG: semitones per sample toward each level.
+	float pegInc[3], pegTarget[3];
+	for (int s = 0; s < 3; ++s) {
+		float l = pegL[s];
+		if (l < -1.f) l = -1.f;
+		if (l > 1.f) l = 1.f;
+		pegTarget[s] = l * 48.f;
+		pegInc[s] = 96.f * recSr / pegTime(pegR[s]);
+	}
+	if (!unit->pegInit) {
+		unit->pegLevel = pegTarget[2];
+		unit->pegInit = 1;
+	}
+
 	const int algoMod = alms > 1e-6f;
 	Routing rt;
 	makeRouting(algo, &rt);
 	int lastAlgSel = algo;
-
-	if (gateOn && unit->prevGate < 0.5f) {
-		unit->lfoDelayPos = 0.f;
-		unit->pegPos = 0.f;
-		if (lfoOneshot) {
-			unit->lfoPhase = 0.f;
-			unit->oneshotDone = 0;
-			unit->rng = unit->rng * 1664525u + 1013904223u;
-			unit->lfoSh = (unit->rng / 2147483648.f) - 1.f;
-		}
-	}
-	if (trigEdge && lfoOneshot) {
-		unit->lfoPhase = 0.f;
-		unit->oneshotDone = 0;
-		unit->rng = unit->rng * 1664525u + 1013904223u;
-		unit->lfoSh = (unit->rng / 2147483648.f) - 1.f;
-	}
 
 	float targetHz = hzIn * transposeMul;
 	if (targetHz < 8.f) targetHz = 8.f;
@@ -601,6 +548,20 @@ static void DX100Voice_next(DX100Voice* unit, int inNumSamples) {
 		int gateEdge = gateOn && unit->prevGate < 0.5f;
 		unit->prevGate = gateOn ? 1.f : 0.f;
 
+		if (gateEdge) {
+			// Key-on: the chip resets every operator phase, so each
+			// note starts with the same waveform alignment.
+			for (int i = 0; i < 4; ++i) unit->opPhase[i] = 0.f;
+			unit->fbLast = 0.f;
+			unit->fbPrev = 0.f;
+			unit->lfoDelayPos = 0.f;
+			unit->pegStage = kPegL1;
+		}
+		if (!gateOn && unit->pegStage != kPegRest
+				&& unit->pegStage != kPegL3) {
+			unit->pegStage = kPegL3;
+		}
+
 		if (portCoef >= 1.f) {
 			unit->freqLag = targetHz;
 		} else {
@@ -608,75 +569,91 @@ static void DX100Voice_next(DX100Voice* unit, int inNumSamples) {
 		}
 		float freq = unit->freqLag;
 
-		if (gateOn && unit->pegPos < 1.f) {
-			unit->pegPos += recSr * recPegDur;
-			if (unit->pegPos > 1.f) unit->pegPos = 1.f;
+		// pitch EG
+		if (unit->pegStage != kPegRest) {
+			int s = unit->pegStage - 1;
+			float tgt = pegTarget[s];
+			float inc = pegInc[s];
+			float lv = unit->pegLevel;
+			if (lv < tgt) {
+				lv += inc;
+				if (lv >= tgt) lv = tgt;
+			} else if (lv > tgt) {
+				lv -= inc;
+				if (lv <= tgt) lv = tgt;
+			}
+			unit->pegLevel = lv;
+			if (lv == tgt) {
+				if (unit->pegStage == kPegL1) unit->pegStage = kPegL2;
+				else unit->pegStage = kPegRest;
+			}
 		}
-		float peg = (1.f - unit->pegPos) * pegLevP;
-		if (peg != 0.f && pegAmt != 0.f) {
-			freq *= exp2f_fast(peg * pegAmt * 2.f);
+		if (unit->pegLevel != 0.f) {
+			freq *= exp2f_fast(unit->pegLevel * (1.f / 12.f));
 		}
 
-		// envelopes
+		// envelopes (dB domain)
 		for (int i = 0; i < 4; ++i) {
 			OpEnv* e = &unit->env[i];
-			// gate held but still idle: missed the edge (Ctor IN0 garbage).
 			if (gateOn && (gateEdge || e->stage == kIdle)) {
 				e->stage = kAtk;
-				envStartSeg(e, 0.f, 1.f, atkT[i], 0.f, recSr);
 			} else if (!gateOn && e->stage != kIdle && e->stage != kRel) {
 				e->stage = kRel;
-				envStartSeg(e, e->level, 0.f, relT[i], -4.f, recSr);
 			}
-			envTick(e);
-			if (envSegDone(e)) {
-				if (e->stage == kAtk) {
+			switch (e->stage) {
+			case kAtk:
+				e->att -= e->att * atkCoef[i];
+				if (e->att < 0.1f) {
+					e->att = 0.f;
 					e->stage = kD1;
-					envStartSeg(e, 1.f, d1L[i], d1T[i], -4.f, recSr);
-				} else if (e->stage == kD1) {
-					e->stage = kD2;
-					envStartSeg(e, d1L[i], 0.f, d2T[i], -4.f, recSr);
-				} else if (e->stage == kD2) {
-					e->stage = kSus;
-					e->level = 0.f;
-				} else if (e->stage == kRel) {
-					e->stage = kIdle;
-					e->level = 0.f;
 				}
+				break;
+			case kD1:
+				e->att += d1Inc[i];
+				if (e->att >= d1lAtt[i]) {
+					e->att = d1lAtt[i];
+					e->stage = kD2;
+				}
+				break;
+			case kD2:
+				e->att += d2Inc[i];
+				if (e->att >= kSilentDb) {
+					e->att = kSilentDb;
+					e->stage = kSus;
+				}
+				break;
+			case kRel:
+				e->att += relInc[i];
+				if (e->att >= kSilentDb) {
+					e->att = kSilentDb;
+					e->stage = kIdle;
+				}
+				break;
+			default:
+				break;
 			}
 		}
 
-		// LFO
-		if (lfoOneshot) {
-			if (!unit->oneshotDone) {
-				unit->lfoPhase += lfoInc;
-				if (unit->lfoPhase >= 1.f) {
-					unit->lfoPhase = 1.f;
-					unit->oneshotDone = 1;
-				}
-			}
+		// LFO: shared value in, per-voice delay/fade here.
+		if (gateOn && unit->lfoDelayPos < 2.f) {
+			unit->lfoDelayPos += recSr * recDelayD;
+			if (unit->lfoDelayPos > 2.f) unit->lfoDelayPos = 2.f;
+		}
+		float lfoD;
+		if (recDelayD == 0.f) {
+			lfoD = 1.f;
 		} else {
-			unit->lfoPhase = wrap01(unit->lfoPhase + lfoInc);
-			// sample & hold: resample on phase wrap
-			if (lfoWave == 3 && unit->lfoPhase < lfoInc) {
-				unit->rng = unit->rng * 1664525u + 1013904223u;
-				unit->lfoSh = (unit->rng / 2147483648.f) - 1.f;
-			}
+			lfoD = unit->lfoDelayPos - 1.f;
+			if (lfoD < 0.f) lfoD = 0.f;
+			if (lfoD > 1.f) lfoD = 1.f;
 		}
-		if (gateOn && unit->lfoDelayPos < 1.f) {
-			unit->lfoDelayPos += recSr * recDelayTime;
-			if (unit->lfoDelayPos > 1.f) unit->lfoDelayPos = 1.f;
+		float lfo = (lfoUni ? lfoRaw * 0.5f + 0.5f : lfoRaw) * lfoD;
+		// AM is an attenuation: 0 at the LFO trough, amsDb at its peak.
+		float lfo01 = (lfoRaw * 0.5f + 0.5f) * lfoD;
+		if (pmsSemis != 0.f) {
+			freq *= exp2f_fast(lfo * pmsSemis * (1.f / 12.f));
 		}
-		float lfoD = gateOn ? unit->lfoDelayPos : 0.f;
-		float raw = lfoRaw(lfoWave, unit->lfoPhase, unit->lfoSh);
-		float lfo = (lfoUni ? raw * 0.5f + 0.5f : raw) * lfoD;
-		float lfo01 = lfoUni ? lfo : lfo * 0.5f + 0.5f;
-		if (lfo01 < 0.f) lfo01 = 0.f;
-		if (lfo01 > 1.f) lfo01 = 1.f;
-		if (pms != 0.f) {
-			freq *= exp2f_fast(lfo * pmsScale);
-		}
-		float amod = 1.f - (lfo01 * ams);
+		float amAtt = lfo01 * amsDb;
 
 		if (algoMod) {
 			float a = (float)algo + lfo * alms * 15.f;
@@ -696,20 +673,23 @@ static void DX100Voice_next(DX100Voice* unit, int inNumSamples) {
 			oscF[i] = f;
 		}
 
+		// dB -> amplitude, once per op per sample.
 		float envS[4];
 		for (int i = 0; i < 4; ++i) {
-			envS[i] = unit->env[i].level * envScale[i];
+			float att = unit->env[i].att + staticAtt[i];
+			if (ame[i]) att += amAtt;
+			if (grit) att = floorf(att * (1.f / kEnvStepDb)) * kEnvStepDb;
+			envS[i] = (att >= kSilentDb || !opLive[i])
+				? 0.f : exp2f_fast(att * kDbToExp2);
 		}
 
-		// Oscillator core. When oversampling, this inner loop runs `os`
-		// times per output sample at 1/os the phase increment; the last
-		// filtered value is the one we keep. Envelopes, LFO and PEG stay
-		// at base rate above -- they are not what folds.
 		float mix = 0.f;
 		for (int k = 0; k < os; ++k) {
-			// op4 (feedback source)
+			// op4 (feedback source). Feedback uses the mean of the last
+			// two outputs, as the chip does; that lowpass is what keeps
+			// FB 7 a rough saw rather than noise.
 			unit->opPhase[3] = wrap01(unit->opPhase[3] + oscF[3] * recSrOs);
-			float fb = unit->fbLast * fbGain;
+			float fb = (unit->fbLast + unit->fbPrev) * 0.5f * fbGain;
 			float pm4 = fb;
 			if (dxOn) {
 				float dxSeed = sinRad(kTwoPi * unit->opPhase[3] + fb);
@@ -717,38 +697,35 @@ static void DX100Voice_next(DX100Voice* unit, int inNumSamples) {
 					+ dxPiAmt * dxSeed);
 			}
 			float out4 = 0.f;
-			if (opLive[3] && envS[3] > 1e-6f) {
-				out4 = opWave(wave[3], unit->opPhase[3], pm4)
-					* envS[3] * level[3] * amod;
+			if (envS[3] > 1e-6f) {
+				out4 = opWave(wave[3], unit->opPhase[3], pm4, grit) * envS[3];
 			}
+			unit->fbPrev = unit->fbLast;
 			unit->fbLast = out4;
-			if (unit->fbLast > 1.f) unit->fbLast = 1.f;
-			if (unit->fbLast < -1.f) unit->fbLast = -1.f;
 
-			// Ops resolve deepest-first so modulation is same-sample, as
-			// on the original hardware.
+			// Ops resolve deepest-first so modulation is same-sample.
 			unit->opPhase[2] = wrap01(unit->opPhase[2] + oscF[2] * recSrOs);
 			float out3 = 0.f;
-			if (opLive[2] && envS[2] > 1e-6f) {
-				out3 = opWave(wave[2], unit->opPhase[2], rt.mod3_4 * out4)
-					* envS[2] * level[2] * amod;
+			if (envS[2] > 1e-6f) {
+				out3 = opWave(wave[2], unit->opPhase[2], rt.mod3_4 * out4, grit)
+					* envS[2];
 			}
 
 			unit->opPhase[1] = wrap01(unit->opPhase[1] + oscF[1] * recSrOs);
 			float out2 = 0.f;
-			if (opLive[1] && envS[1] > 1e-6f) {
+			if (envS[1] > 1e-6f) {
 				out2 = opWave(wave[1], unit->opPhase[1],
-						rt.mod2_3 * out3 + rt.mod2_4 * out4)
-					* envS[1] * level[1] * amod;
+						rt.mod2_3 * out3 + rt.mod2_4 * out4, grit)
+					* envS[1];
 			}
 
 			unit->opPhase[0] = wrap01(unit->opPhase[0] + oscF[0] * recSrOs);
 			float out1 = 0.f;
-			if (opLive[0] && envS[0] > 1e-6f) {
+			if (envS[0] > 1e-6f) {
 				out1 = opWave(wave[0], unit->opPhase[0],
 						rt.mod1_2 * out2 + rt.mod1_3 * out3
-						+ rt.mod1_4 * out4)
-					* envS[0] * level[0] * amod;
+						+ rt.mod1_4 * out4, grit)
+					* envS[0];
 			}
 
 			mix = rt.car1 * out1 + rt.car2 * out2
@@ -758,17 +735,14 @@ static void DX100Voice_next(DX100Voice* unit, int inNumSamples) {
 				mix = biquad(mix, lpCoef[1], unit->dz[1]);
 			}
 		}
-		out[n] = mix * rt.norm;
+		out[n] = mix;
 	}
 
-	// envSum feeds only A2K.kr -> Lag.kr in the SynthDef (the FreeSelf
-	// test), and A2K reads index 0 only. Writing all 64 samples was 63
-	// wasted stores plus a 4-add accumulation per sample; write the
-	// block's final value once. The output stays audio-rate because the
-	// sclang wrapper declares both outputs at `rate`.
+	// Linear sum of op amplitudes for the free test; A2K reads index 0.
 	float envSum = 0.f;
 	for (int i = 0; i < 4; ++i) {
-		envSum += unit->env[i].level * envScale[i];
+		float att = unit->env[i].att + staticAtt[i];
+		envSum += (att >= kSilentDb) ? 0.f : exp2f_fast(att * kDbToExp2);
 	}
 	for (int n = 0; n < inNumSamples; ++n) {
 		envOut[n] = envSum;
