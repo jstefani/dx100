@@ -123,10 +123,11 @@ function M.parse_vced(bytes, at, ratios)
     alg = bytes[p], fbl = bytes[p + 1], lfs = bytes[p + 2], lfd = bytes[p + 3],
     pmd = bytes[p + 4], amd = bytes[p + 5], sync = bytes[p + 6],
     lfw = bytes[p + 7], pms = bytes[p + 8], ams = bytes[p + 9],
-    trps = bytes[p + 10], mono = bytes[p + 11], pbr = bytes[p + 12],
-    pm = bytes[p + 13], port = bytes[p + 14],
-    -- p+15 foot volume, p+16 sustain fs, p+17 portamento fs
-    ch = bytes[p + 18],
+    trps = bytes[p + 10], pbr = bytes[p + 11], ch = bytes[p + 12],
+    mono = bytes[p + 13],
+    -- p+14 sustain fs, p+15 portamento fs
+    pm = bytes[p + 16], port = bytes[p + 17],
+    -- p+18 foot volume
     mwp = bytes[p + 19], mwa = bytes[p + 20], bcp = bytes[p + 21],
     bca = bytes[p + 22], bcpb = bytes[p + 23], bceb = bytes[p + 24],
     name = name_of(bytes, p + 25),

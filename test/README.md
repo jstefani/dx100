@@ -30,6 +30,17 @@ Deploy with `test/` excluded:
     rsync -av --exclude '.git' --exclude 'test' \
       ./ we@norns.local:~/dust/code/dx100/
 
+## lua
+
+`lib/sysex.lua` is plain Lua, so its parser runs off-device:
+
+    lua test/sysex_test.lua
+
+Packs one voice into both dump layouts (VCED and VMEM) by hand, per the
+DX100 / DX21 / TX81Z MIDI data format tables, and checks that both parse
+to the same table with every field in place, mono/poly and portamento
+mode included.
+
 ## scripts
 
 - `sinosc_phase_bound.scd` — measures where SinOsc's phase input breaks
