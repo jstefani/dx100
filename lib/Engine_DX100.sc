@@ -103,6 +103,13 @@ Engine_DX100 : CroneEngine {
 			// Velocity reaches the sound only through per-op KVS, as on
 			// the hardware; no global velocity->amp here.
 			snd = snd * kill * Lag.kr(amp, 0.05);
+			// Make-up gain. Operator level is a hardware TL curve (0.75
+			// dB/step), so a carrier at OL 87 already sits 9 dB down and
+			// real patches run 80-93. The DX100's output stage brings
+			// that back up; +8 dB puts an OL 87 carrier where the old
+			// linear OL/99 mapping had it. OL 99 lands 8 dB hotter than
+			// before, which is what the headroom control is for.
+			snd = snd * 8.dbamp;
 			snd = snd * Lag.kr(voiceScale, 0.03) * Lag.kr(headroom, 0.05);
 			Out.ar(out, Pan2.ar(snd, Lag.kr(pan, 0.08)));
 		}).add;
