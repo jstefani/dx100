@@ -1469,5 +1469,6 @@ end
 function cleanup()
   if gfx then gfx:stop() end
   if splash_clk then clock.cancel(splash_clk) end
-  engine.note_off_all()
+  -- nil when cleanup runs before the engine loaded (matron restart)
+  if engine.note_off_all then engine.note_off_all() end
 end
