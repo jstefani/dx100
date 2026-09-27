@@ -388,8 +388,11 @@ local function add_voices(voices, source)
   screen_dirty = true
 end
 
+local imported_from = nil -- path of the .syx bank now in the preset list
+
 local function clear_imported()
   for i = #presets, FACTORY_COUNT + 1, -1 do presets[i] = nil end
+  imported_from = nil
   set_preset_range()
   flash("SYSEX", "cleared")
   screen_dirty = true
@@ -417,6 +420,7 @@ local function sysex_received(bytes)
     voices[1].name = voices[1].name .. " (midi)"
   end
   add_voices(voices, "midi")
+  imported_from = nil -- the list is no longer just the .syx bank
 end
 
 local function rnd_voice()
@@ -1270,9 +1274,13 @@ function init()
   -- before its preset index is restored.
   params:add_separator("sysex")
   params:add_file("syx_file", "import .syx", "-")
+  -- params:read() then params:bang() both fire this on init; skip the
+  -- second import when the same bank is already in the list.
   params:set_action("syx_file", function(path)
+    if path == imported_from then return end
     clear_imported()
     import_syx_file(path)
+    if #presets > FACTORY_COUNT then imported_from = path end
   end)
   -- the menu right-aligns the file name against the label; a long name
   -- runs into it. show a short stem instead of the full file name.
